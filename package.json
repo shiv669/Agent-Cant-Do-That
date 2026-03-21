@@ -1,0 +1,17 @@
+{
+  "name": "agent-cant-do-that",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "libs/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/console",
+    "dev:console": "npm run dev -w apps/console",
+    "dev:api": "npm run start:dev -w apps/api",
+    "dev:worker": "npm run dev -w apps/worker",
+    "build": "npm run build -w apps/console && npm run build -w apps/api && npm run build -w apps/worker",
+    "lint": "npm run lint -w apps/console && npm run lint -w apps/api && npm run lint -w apps/worker"
+  }
+}
