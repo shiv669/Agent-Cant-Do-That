@@ -11,7 +11,14 @@
     "dev:console": "npm run dev -w apps/console",
     "dev:api": "npm run start:dev -w apps/api",
     "dev:worker": "npm run dev -w apps/worker",
+    "dev:all": "concurrently \"npm run dev:console\" \"npm run dev:api\" \"npm run dev:worker\"",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "setup:auth0": "node tools/auth0/setup.mjs",
     "build": "npm run build -w apps/console && npm run build -w apps/api && npm run build -w apps/worker",
     "lint": "npm run lint -w apps/console && npm run lint -w apps/api && npm run lint -w apps/worker"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   }
 }
