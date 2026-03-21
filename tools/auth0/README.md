@@ -4,7 +4,7 @@ This folder contains an idempotent setup script to create/update the required Au
 
 ## What it provisions
 
-- Resource server (API): `https://agent-cant-do-that/api`
+- Resource server (API): `https://agentcantdothat/api`
 - API scopes:
   - `orchestrate:customer_offboarding`
   - `execute:refund`
@@ -40,3 +40,4 @@ npm run setup:auth0
 
 - Script is idempotent: it will update existing resources where possible.
 - It does not create users; role assignment to users is intentionally left to tenant operators.
+- If `AUTH0_BOOTSTRAP_CLIENT_ID` or `AUTH0_BOOTSTRAP_CLIENT_SECRET` is empty, the script exits successfully in manual Auth0 setup mode.

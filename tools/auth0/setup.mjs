@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
-const required = ['AUTH0_DOMAIN', 'AUTH0_BOOTSTRAP_CLIENT_ID', 'AUTH0_BOOTSTRAP_CLIENT_SECRET'];
+import 'dotenv/config';
+
+const required = ['AUTH0_DOMAIN'];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Missing required env var: ${key}`);
@@ -8,12 +10,20 @@ for (const key of required) {
   }
 }
 
+const bootstrapClientIdRaw = process.env.AUTH0_BOOTSTRAP_CLIENT_ID ?? '';
+const bootstrapClientSecretRaw = process.env.AUTH0_BOOTSTRAP_CLIENT_SECRET ?? '';
+const bootstrapClientId = bootstrapClientIdRaw.trim().replace(/^['"]|['"]$/g, '');
+const bootstrapClientSecret = bootstrapClientSecretRaw.trim().replace(/^['"]|['"]$/g, '');
+
+if (!bootstrapClientId || !bootstrapClientSecret) {
+  console.log('Auth0 bootstrap credentials are empty. Skipping provisioning (manual Auth0 setup mode).');
+  process.exit(0);
+}
+
 const domain = process.env.AUTH0_DOMAIN;
-const bootstrapClientId = process.env.AUTH0_BOOTSTRAP_CLIENT_ID;
-const bootstrapClientSecret = process.env.AUTH0_BOOTSTRAP_CLIENT_SECRET;
 
 const audience = `https://${domain}/api/v2/`;
-const apiIdentifier = 'https://agent-cant-do-that/api';
+const apiIdentifier = 'https://agentcantdothat/api';
 
 const scopes = [
   { value: 'orchestrate:customer_offboarding', description: 'Orchestrate customer offboarding workflow' },

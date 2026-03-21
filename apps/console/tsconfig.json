@@ -20,6 +20,8 @@
       "@/*": [
         "./*"
       ]
+      ,
+      "@contracts/*": ["../../libs/contracts/src/*"]
     },
     "isolatedModules": true
   },

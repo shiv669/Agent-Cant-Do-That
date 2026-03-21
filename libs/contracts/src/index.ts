@@ -28,3 +28,15 @@ export interface WorkflowStatusResponse {
   workflowId: string;
   status: WorkflowStatus;
 }
+
+export interface LedgerEvent {
+  seqId: number;
+  workflowId: string;
+  eventType: LedgerEventType;
+  createdAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface StartOffboardingResponse extends WorkflowStatusResponse {
+  customerId: string;
+}
