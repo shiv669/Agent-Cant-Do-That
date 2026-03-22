@@ -12,4 +12,4 @@ npm run dev:api
 ```
 
 Health check:
-- `http://localhost:4000/api/health`
+- `http://localhost:4001/api/health`

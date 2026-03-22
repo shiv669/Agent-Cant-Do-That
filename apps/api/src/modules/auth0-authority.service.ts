@@ -19,7 +19,11 @@ type CibaAuthorizeResponse = {
 };
 
 type CibaPollResult =
-  | { status: 'approved'; approvedAt: string }
+  | {
+      status: 'approved';
+      approvedAt: string;
+      subjectToken: string;
+    }
   | { status: 'denied'; reason: string }
   | { status: 'timeout'; reason: string };
 
@@ -80,39 +84,45 @@ export class Auth0AuthorityService {
     };
   }
 
-  async mintExecutionToken(actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>): Promise<MintedToken> {
-    const { domain, audience, clientId, clientSecret } = this.getTokenClientConfig();
+  async mintExecutionToken(
+    actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>,
+    cibaAccessToken: string
+  ): Promise<MintedToken> {
+    const { domain } = this.getTokenClientConfig();
 
-    if (!domain || !audience || !clientId || !clientSecret) {
+    if (!domain) {
       throw new Error('Missing Auth0 token mint configuration');
     }
 
-    const response = await fetch(`https://${domain}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'client_credentials',
-        client_id: clientId,
-        client_secret: clientSecret,
-        audience,
-        scope: actionScope
-      })
-    });
-
-    const body = (await response.json()) as {
-      access_token?: string;
-      expires_in?: number;
-      error?: string;
-      error_description?: string;
-    };
-
-    if (!response.ok || !body.access_token || !body.expires_in) {
-      throw new Error(body.error_description ?? body.error ?? 'Auth0 failed to mint execution token');
+    if (!cibaAccessToken) {
+      throw new Error('Missing CIBA approved access token');
     }
 
+    const response = await fetch(`https://${domain}/userinfo`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${cibaAccessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      if (response.status === 401) {
+        throw new Error('Authority token validation failed: token expired or invalid');
+      }
+      throw new Error(`Authority token validation failed (${response.status}): ${text || 'userinfo check failed'}`);
+    }
+
+    const payload = (await response.json()) as { sub?: string };
+    if (!payload.sub) {
+      throw new Error(`Authority token validation failed: userinfo response missing sub for ${actionScope}`);
+    }
+
+    console.log('Authority token validated via Auth0 userinfo');
+
     return {
-      accessToken: body.access_token,
-      expiresIn: body.expires_in
+      accessToken: cibaAccessToken,
+      expiresIn: 120
     };
   }
 
@@ -137,6 +147,8 @@ export class Auth0AuthorityService {
       const text = await response.text();
       throw new Error(text || 'Auth0 token revoke request failed');
     }
+
+    console.log('Authority token revoked via Auth0');
   }
 
   async requestCibaApproval(input: {
@@ -219,10 +231,18 @@ export class Auth0AuthorityService {
         error_description?: string;
       }>(response);
 
-      if (response.ok && payload.access_token) {
+      if (response.ok) {
+        if (payload.access_token) {
+          return {
+            status: 'approved',
+            approvedAt: new Date().toISOString(),
+            subjectToken: payload.access_token
+          };
+        }
+
         return {
-          status: 'approved',
-          approvedAt: new Date().toISOString()
+          status: 'denied',
+          reason: 'CIBA approved but no access_token was returned'
         };
       }
 

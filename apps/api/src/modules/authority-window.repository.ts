@@ -7,6 +7,8 @@ export type AuthorityWindowRecord = {
   workflow_id: string;
   action_scope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
   bound_agent_client_id: string;
+  ciba_subject_token: string | null;
+  ciba_subject_token_type: string | null;
   claimant_agent_client_id: string | null;
   status: AuthorityWindowStatus;
   authority_window_token: string | null;
@@ -33,6 +35,8 @@ export class AuthorityWindowRepository {
         workflow_id TEXT NOT NULL,
         action_scope TEXT NOT NULL,
         bound_agent_client_id TEXT NOT NULL,
+        ciba_subject_token TEXT NULL,
+        ciba_subject_token_type TEXT NULL,
         claimant_agent_client_id TEXT NULL,
         status TEXT NOT NULL,
         authority_window_token TEXT NULL,
@@ -48,6 +52,16 @@ export class AuthorityWindowRepository {
       CREATE INDEX IF NOT EXISTS idx_authority_windows_workflow_status
       ON authority_windows (workflow_id, status, created_at DESC);
     `);
+
+    await this.pool.query(`
+      ALTER TABLE authority_windows
+      ADD COLUMN IF NOT EXISTS ciba_subject_token TEXT NULL;
+    `);
+
+    await this.pool.query(`
+      ALTER TABLE authority_windows
+      ADD COLUMN IF NOT EXISTS ciba_subject_token_type TEXT NULL;
+    `);
   }
 
   async insertWindow(input: {
@@ -55,6 +69,8 @@ export class AuthorityWindowRepository {
     workflowId: string;
     actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
     boundAgentClientId: string;
+    cibaSubjectToken: string;
+    cibaSubjectTokenType: string;
     status: AuthorityWindowStatus;
     expiresAt: Date;
   }): Promise<AuthorityWindowRecord> {
@@ -65,10 +81,12 @@ export class AuthorityWindowRepository {
           workflow_id,
           action_scope,
           bound_agent_client_id,
+          ciba_subject_token,
+          ciba_subject_token_type,
           status,
           expires_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING *;
       `,
       [
@@ -76,6 +94,8 @@ export class AuthorityWindowRepository {
         input.workflowId,
         input.actionScope,
         input.boundAgentClientId,
+        input.cibaSubjectToken,
+        input.cibaSubjectTokenType,
         input.status,
         input.expiresAt.toISOString()
       ]

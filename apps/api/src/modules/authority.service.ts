@@ -172,6 +172,8 @@ export class AuthorityService implements OnModuleInit {
       workflowId: input.workflowId,
       actionScope: input.actionScope,
       boundAgentClientId: input.boundAgentClientId,
+      cibaSubjectToken: cibaResult.subjectToken,
+      cibaSubjectTokenType: 'urn:ietf:params:oauth:token-type:access_token',
       status: 'requested',
       expiresAt
     });
@@ -232,7 +234,14 @@ export class AuthorityService implements OnModuleInit {
       throw new ForbiddenException({ reason: 'Window is bound to a different agent identity' });
     }
 
-    const minted = await this.auth0AuthorityService.mintExecutionToken(window.action_scope);
+    if (!window.ciba_subject_token || !window.ciba_subject_token_type) {
+      throw new ForbiddenException({ reason: 'Missing CIBA subject token metadata for authority exchange' });
+    }
+
+    const minted = await this.auth0AuthorityService.mintExecutionToken(
+      window.action_scope,
+      window.ciba_subject_token
+    );
     const claimed = await this.authorityWindowRepository.markClaimed({
       windowId: window.window_id,
       claimantAgentClientId: input.claimantAgentClientId,
