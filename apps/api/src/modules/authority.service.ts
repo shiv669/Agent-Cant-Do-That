@@ -1,18 +1,219 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, OnModuleInit } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type {
+  AuthorityWindowClaimInput,
+  AuthorityWindowClaimResponse,
+  AuthorityWindowConsumeInput,
+  AuthorityWindowConsumeResponse,
+  AuthorityWindowReplayAttemptInput,
+  AuthorityWindowRequestInput,
+  AuthorityWindowRequestResponse,
   AuthorityCheckResponse,
   EscalationAttemptInput,
   HighRiskAuthorityCheckInput
 } from '@contracts/index';
 import { Auth0AuthorityService } from './auth0-authority.service';
+import { AuthorityWindowRepository } from './authority-window.repository';
 import { LedgerRepository } from './ledger.repository';
 
 @Injectable()
-export class AuthorityService {
+export class AuthorityService implements OnModuleInit {
   constructor(
     private readonly auth0AuthorityService: Auth0AuthorityService,
+    private readonly authorityWindowRepository: AuthorityWindowRepository,
     private readonly ledgerRepository: LedgerRepository
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.authorityWindowRepository.ensureSchema();
+  }
+
+  async requestAuthorityWindow(input: AuthorityWindowRequestInput): Promise<AuthorityWindowRequestResponse> {
+    const ttlSeconds = Math.min(Math.max(input.ttlSeconds ?? 120, 30), 300);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+    const windowId = randomUUID();
+
+    const window = await this.authorityWindowRepository.insertWindow({
+      windowId,
+      workflowId: input.workflowId,
+      actionScope: input.actionScope,
+      boundAgentClientId: input.boundAgentClientId,
+      status: 'requested',
+      expiresAt
+    });
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: input.workflowId,
+      eventType: 'authority_window_requested',
+      payload: {
+        windowId,
+        actionScope: input.actionScope,
+        boundAgentClientId: input.boundAgentClientId,
+        ttlSeconds,
+        expiresAt: expiresAt.toISOString()
+      }
+    });
+
+    return {
+      windowId: window.window_id,
+      workflowId: window.workflow_id,
+      actionScope: window.action_scope,
+      boundAgentClientId: window.bound_agent_client_id,
+      expiresAt: new Date(window.expires_at).toISOString(),
+      status: window.status
+    };
+  }
+
+  async claimAuthorityWindow(input: AuthorityWindowClaimInput): Promise<AuthorityWindowClaimResponse> {
+    await this.authorityWindowRepository.markExpiredWindows();
+    const window = await this.authorityWindowRepository.findWindow(input.windowId);
+
+    if (!window) {
+      throw new ForbiddenException({ reason: 'Authority window does not exist' });
+    }
+
+    if (window.status === 'consumed' || window.status === 'revoked' || window.status === 'expired') {
+      await this.ledgerRepository.appendEvent({
+        workflowId: window.workflow_id,
+        eventType: 'replay_attempt_blocked',
+        payload: {
+          windowId: window.window_id,
+          claimantAgentClientId: input.claimantAgentClientId,
+          status: window.status
+        }
+      });
+      throw new ForbiddenException({ reason: 'Replay blocked' });
+    }
+
+    if (window.bound_agent_client_id !== input.claimantAgentClientId) {
+      await this.ledgerRepository.appendEvent({
+        workflowId: window.workflow_id,
+        eventType: 'cross_action_propagation_denied',
+        payload: {
+          windowId: window.window_id,
+          boundAgentClientId: window.bound_agent_client_id,
+          claimantAgentClientId: input.claimantAgentClientId
+        }
+      });
+      throw new ForbiddenException({ reason: 'Window is bound to a different agent identity' });
+    }
+
+    const minted = await this.auth0AuthorityService.mintExecutionToken(window.action_scope);
+    const claimed = await this.authorityWindowRepository.markClaimed({
+      windowId: window.window_id,
+      claimantAgentClientId: input.claimantAgentClientId,
+      authorityWindowToken: minted.accessToken
+    });
+
+    if (!claimed) {
+      throw new ForbiddenException({ reason: 'Window cannot be claimed' });
+    }
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: claimed.workflow_id,
+      eventType: 'authority_window_claimed',
+      payload: {
+        windowId: claimed.window_id,
+        claimantAgentClientId: input.claimantAgentClientId,
+        expiresAt: new Date(claimed.expires_at).toISOString(),
+        tokenTtlSeconds: minted.expiresIn
+      }
+    });
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: claimed.workflow_id,
+      eventType: 'authority_window_issued',
+      payload: {
+        windowId: claimed.window_id,
+        actionScope: claimed.action_scope,
+        boundAgentClientId: claimed.bound_agent_client_id
+      }
+    });
+
+    return {
+      windowId: claimed.window_id,
+      workflowId: claimed.workflow_id,
+      actionScope: claimed.action_scope,
+      claimantAgentClientId: input.claimantAgentClientId,
+      status: claimed.status,
+      authorityWindowToken: minted.accessToken,
+      expiresAt: new Date(claimed.expires_at).toISOString()
+    };
+  }
+
+  async consumeAuthorityWindow(input: AuthorityWindowConsumeInput): Promise<AuthorityWindowConsumeResponse> {
+    const window = await this.authorityWindowRepository.findWindow(input.windowId);
+    if (!window) {
+      throw new ForbiddenException({ reason: 'Authority window does not exist' });
+    }
+
+    if (window.claimant_agent_client_id !== input.claimantAgentClientId) {
+      throw new ForbiddenException({ reason: 'Claimant identity mismatch' });
+    }
+
+    if (window.status !== 'claimed' || !window.authority_window_token) {
+      throw new ForbiddenException({ reason: 'Only claimed windows can be consumed' });
+    }
+
+    await this.auth0AuthorityService.revokeExecutionToken(window.authority_window_token);
+    const consumed = await this.authorityWindowRepository.markConsumed(window.window_id);
+    const revoked = await this.authorityWindowRepository.markRevoked(window.window_id);
+
+    if (!consumed || !revoked) {
+      throw new ForbiddenException({ reason: 'Window consume/revoke transition failed' });
+    }
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: consumed.workflow_id,
+      eventType: 'authority_window_consumed',
+      payload: {
+        windowId: consumed.window_id,
+        actionScope: consumed.action_scope,
+        claimantAgentClientId: input.claimantAgentClientId
+      }
+    });
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: revoked.workflow_id,
+      eventType: 'authority_token_revoked',
+      payload: {
+        windowId: revoked.window_id,
+        revokedAt: new Date(revoked.revoked_at ?? new Date()).toISOString()
+      }
+    });
+
+    return {
+      windowId: revoked.window_id,
+      workflowId: revoked.workflow_id,
+      actionScope: revoked.action_scope,
+      status: revoked.status
+    };
+  }
+
+  async replayAttempt(input: AuthorityWindowReplayAttemptInput): Promise<never> {
+    const window = await this.authorityWindowRepository.findWindow(input.windowId);
+
+    if (!window) {
+      throw new ForbiddenException({ reason: 'Authority window does not exist' });
+    }
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: window.workflow_id,
+      eventType: 'replay_attempt_blocked',
+      payload: {
+        windowId: window.window_id,
+        claimantAgentClientId: input.claimantAgentClientId,
+        status: window.status
+      }
+    });
+
+    throw new ForbiddenException({
+      windowId: window.window_id,
+      workflowId: window.workflow_id,
+      reason: 'Replay attempt blocked'
+    });
+  }
 
   async checkHighRiskAction(input: HighRiskAuthorityCheckInput): Promise<AuthorityCheckResponse> {
     const decision = await this.auth0AuthorityService.checkExecutionAuthority(input.actionScope, input.authorityWindowToken);
