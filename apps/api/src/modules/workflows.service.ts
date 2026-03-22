@@ -13,6 +13,10 @@ import type { OnModuleInit } from '@nestjs/common';
 export class WorkflowsService implements OnModuleInit {
   constructor(private readonly ledgerRepository: LedgerRepository) {}
 
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   async onModuleInit(): Promise<void> {
     await this.ledgerRepository.ensureSchema();
   }
@@ -44,8 +48,25 @@ export class WorkflowsService implements OnModuleInit {
       args: [input]
     });
 
-    await this.appendEvent(workflowId, 'authorization_blocked', {
-      reason: 'Initial high-risk placeholder state from workflow scaffold',
+    await this.sleep(1500);
+    await this.appendEvent(workflowId, 'customer_validation_passed', {
+      customerId: input.customerId,
+      status: 'active'
+    });
+
+    await this.sleep(2000);
+    await this.appendEvent(workflowId, 'data_stores_enumerated', {
+      storeCount: 14
+    });
+
+    await this.sleep(1000);
+    await this.appendEvent(workflowId, 'compliance_check_passed', {
+      legalHolds: 0,
+      offboardingPermitted: true
+    });
+
+    await this.appendEvent(workflowId, 'high_risk_action_blocked', {
+      reason: 'Authority window absent - execution blocked',
       actionScope: 'execute:refund'
     });
 

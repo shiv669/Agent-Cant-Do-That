@@ -353,7 +353,8 @@ export class AuthorityService implements OnModuleInit {
         eventType: 'high_risk_action_blocked',
         payload: {
           actionScope: input.actionScope,
-          reason: decision.reason,
+          reason: 'Authority window absent - execution blocked',
+          upstreamReason: decision.reason,
           upstreamStatus: decision.upstreamStatus
         }
       });

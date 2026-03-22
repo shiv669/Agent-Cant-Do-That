@@ -4,6 +4,9 @@ export type ActionScope =
   | 'execute:data_deletion';
 
 export type LedgerEventType =
+  | 'customer_validation_passed'
+  | 'data_stores_enumerated'
+  | 'compliance_check_passed'
   | 'high_risk_action_blocked'
   | 'authorization_blocked'
   | 'unauthorized_escalation_attempt_recorded'

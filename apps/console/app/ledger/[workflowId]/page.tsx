@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import type { LedgerEvent } from '@contracts/index';
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+const apiBase = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4001';
 
 type WindowState = {
   windowId: string;
@@ -31,6 +31,9 @@ function summarizeEvent(event: LedgerEvent): string {
   const payload = asPayload(event.payload);
 
   const keysByType: Record<string, string[]> = {
+    customer_validation_passed: ['customerId', 'status'],
+    data_stores_enumerated: ['storeCount'],
+    compliance_check_passed: ['legalHolds', 'offboardingPermitted'],
     high_risk_action_blocked: ['actionScope', 'reason'],
     unauthorized_escalation_attempt_recorded: ['actionScope', 'reason'],
     step_up_requested: ['approverRole', 'approverUserId', 'bindingMessage'],

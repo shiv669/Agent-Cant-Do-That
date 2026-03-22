@@ -1,10 +1,28 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { LedgerEvent, StartOffboardingResponse, WorkflowStatusResponse } from '@contracts/index';
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+const apiBase = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4001';
+
+const progressionSteps = [
+  {
+    eventType: 'customer_validation_passed',
+    pending: 'VALIDATING CUSTOMER...',
+    done: '✓ Customer ENT-00441 active'
+  },
+  {
+    eventType: 'data_stores_enumerated',
+    pending: 'ENUMERATING DATA STORES...',
+    done: '✓ 14 stores identified'
+  },
+  {
+    eventType: 'compliance_check_passed',
+    pending: 'CHECKING COMPLIANCE...',
+    done: '✓ No holds, cleared'
+  }
+] as const;
 
 export default function HomePage() {
   const [customerId, setCustomerId] = useState('ENT-00441');
@@ -15,6 +33,36 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
 
   const workflowId = useMemo(() => startResult?.workflowId ?? '', [startResult]);
+
+  useEffect(() => {
+    if (!workflowId) return;
+
+    let active = true;
+
+    const fetchLedger = async () => {
+      try {
+        const response = await fetch(`${apiBase}/api/authority/ledger/${workflowId}`, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`Ledger load failed (${response.status})`);
+        }
+
+        const data = (await response.json()) as LedgerEvent[];
+        if (!active) return;
+        setLedger(data);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : 'Failed to load ledger updates');
+      }
+    };
+
+    fetchLedger();
+    const poll = setInterval(fetchLedger, 3000);
+
+    return () => {
+      active = false;
+      clearInterval(poll);
+    };
+  }, [workflowId]);
 
   const startWorkflow = async () => {
     setError(null);
@@ -35,7 +83,7 @@ export default function HomePage() {
       setStartResult(data);
       setStatus({ workflowId: data.workflowId, status: data.status });
 
-      const ledgerResponse = await fetch(`${apiBase}/api/workflows/${data.workflowId}/ledger`);
+      const ledgerResponse = await fetch(`${apiBase}/api/authority/ledger/${data.workflowId}`);
       if (ledgerResponse.ok) {
         setLedger((await ledgerResponse.json()) as LedgerEvent[]);
       }
@@ -54,11 +102,20 @@ export default function HomePage() {
       setStatus((await response.json()) as WorkflowStatusResponse);
     }
 
-    const ledgerResponse = await fetch(`${apiBase}/api/workflows/${workflowId}/ledger`);
+    const ledgerResponse = await fetch(`${apiBase}/api/authority/ledger/${workflowId}`);
     if (ledgerResponse.ok) {
       setLedger((await ledgerResponse.json()) as LedgerEvent[]);
     }
   };
+
+  const stepCompletion = useMemo(() => {
+    return progressionSteps.map((step) => ledger.some((event) => event.eventType === step.eventType));
+  }, [ledger]);
+
+  const highestCompletedIndex = stepCompletion.lastIndexOf(true);
+  const blockEvent = useMemo(() => {
+    return ledger.find((event) => event.eventType === 'high_risk_action_blocked');
+  }, [ledger]);
 
   return (
     <main className="min-h-screen bg-background px-6 py-10">
@@ -105,6 +162,30 @@ export default function HomePage() {
             <p className="text-sm text-slate-700">
               <strong>Status:</strong> {status?.status ?? startResult.status}
             </p>
+
+            <div className="mt-4 space-y-2 rounded border border-secondary_light bg-slate-50 p-3 font-mono text-sm">
+              {progressionSteps.map((step, index) => {
+                if (index > highestCompletedIndex + 1) {
+                  return null;
+                }
+
+                const complete = stepCompletion[index];
+                return (
+                  <p key={step.eventType} className={complete ? 'text-emerald-700' : 'text-slate-700'}>
+                    {complete ? step.done : step.pending}
+                  </p>
+                );
+              })}
+            </div>
+
+            {blockEvent ? (
+              <div className="mt-4 bg-slate-900 px-4 py-3 font-mono text-sm text-rose-200">
+                <p>████████████████████████████████</p>
+                <p>AGENT CAN&apos;T DO THAT</p>
+                <p>Authority window absent - execution blocked</p>
+                <p>████████████████████████████████</p>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
