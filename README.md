@@ -172,14 +172,110 @@ Primary implementation specs:
 
 ## Setup and Running
 
-This section is the runbook surface for judges and developers and will include final setup commands as implementation lands.
+### 1. Prerequisites
 
-Submission-ready setup checklist:
-- Environment variables and local secrets template (`.env.example`)
-- Auth0 tenant configuration steps (application, API, scopes, MFA policy, role mapping)
-- Local infrastructure startup (Docker Compose)
-- Service start commands (API, worker, console)
-- Demo data seed and demo reset command
+- Node.js 20+
+- npm 10+
+- Docker Desktop (for Postgres, Redis, Temporal)
+
+### 2. Install dependencies
+
+From repository root:
+
+```bash
+npm install
+```
+
+### 3. Configure environment
+
+Create `.env` in repository root from `.env.example` and set real Auth0 values.
+
+Required runtime keys:
+
+- `PORT=4001`
+- `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agentcantdothat`
+- `TEMPORAL_ADDRESS=localhost:7233`
+- `TEMPORAL_NAMESPACE=default`
+- `CFO_USER_ID=<auth0 user id>`
+- `DPO_USER_ID=<auth0 user id>`
+- Auth0 client and audience settings for Token Vault/CIBA
+
+Console URL config is in `apps/console/.env.local`:
+
+```bash
+NEXT_PUBLIC_API_URL=http://localhost:4001
+```
+
+### 4. Start infrastructure
+
+```bash
+npm run infra:up
+```
+
+This starts:
+
+- PostgreSQL on `5432`
+- Redis on `6379`
+- Temporal on `7233`
+- Temporal UI on `8080`
+
+### 5. Start services
+
+Use separate terminals:
+
+Terminal A (API):
+
+```bash
+npm run dev:api
+```
+
+Terminal B (Worker):
+
+```bash
+npm run dev:worker
+```
+
+Terminal C (Console):
+
+```bash
+npm run dev:console
+```
+
+If port `3000` is already in use, Next.js will move to `3001` automatically.
+
+### 6. Health checks
+
+- API: `http://localhost:4001/api/health`
+- Console: `http://localhost:3000` (or `http://localhost:3001` if auto-shifted)
+
+### 7. Demo run (full thesis flow)
+
+1. Start a workflow from the console homepage.
+2. Confirm low-risk actions log first:
+	- `revoke_sso_access_completed`
+	- `billing_history_exported`
+	- `subscriptions_cancelled`
+3. Confirm pre-block competence sequence:
+	- `customer_validation_passed`
+	- `data_stores_enumerated`
+	- `compliance_check_passed`
+4. Confirm first high-risk block.
+5. Trigger escalation + CFO approval path for refund.
+6. Consume/revoke refund authority window.
+7. Confirm second block for deletion (no authority carry-forward).
+8. Trigger DPO approval path for deletion.
+9. Consume/revoke deletion authority window.
+10. Confirm final ledger includes `cross_action_propagation_check_passed`.
+
+Example verified workflow id:
+
+- `offboarding-final-e2e-002-1774177327353`
+
+### 8. Stop infrastructure
+
+```bash
+npm run infra:down
+```
 
 Sandbox and safety note:
 - Demo mode uses sandbox integrations only.
