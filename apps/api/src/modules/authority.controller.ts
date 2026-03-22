@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import type {
   AuthorityWindowClaimInput,
   AuthorityWindowConsumeInput,
@@ -24,22 +24,54 @@ export class AuthorityController {
   }
 
   @Post('window/request')
-  async requestAuthorityWindow(@Body() body: AuthorityWindowRequestInput) {
-    return this.authorityService.requestAuthorityWindow(body);
+  async requestAuthorityWindow(@Body() body: AuthorityWindowRequestInput & { agentId?: string; scope?: string }) {
+    const normalized: AuthorityWindowRequestInput = {
+      workflowId: body.workflowId,
+      customerId: body.customerId,
+      actionScope: (body.actionScope ?? body.scope) as AuthorityWindowRequestInput['actionScope'],
+      requestingAgentClientId: body.requestingAgentClientId ?? body.agentId ?? 'orchestrator-a',
+      boundAgentClientId: body.boundAgentClientId ?? body.agentId ?? 'subagent-d-client',
+      amount: body.amount,
+      ttlSeconds: body.ttlSeconds
+    };
+
+    return this.authorityService.requestAuthorityWindow(normalized);
   }
 
   @Post('window/claim')
-  async claimAuthorityWindow(@Body() body: AuthorityWindowClaimInput) {
-    return this.authorityService.claimAuthorityWindow(body);
+  async claimAuthorityWindow(@Body() body: AuthorityWindowClaimInput & { agentId?: string }) {
+    const normalized: AuthorityWindowClaimInput = {
+      windowId: body.windowId,
+      claimantAgentClientId: body.claimantAgentClientId ?? body.agentId ?? ''
+    };
+    return this.authorityService.claimAuthorityWindow(normalized);
   }
 
   @Post('window/consume')
-  async consumeAuthorityWindow(@Body() body: AuthorityWindowConsumeInput) {
-    return this.authorityService.consumeAuthorityWindow(body);
+  async consumeAuthorityWindow(@Body() body: AuthorityWindowConsumeInput & { agentId?: string }) {
+    const normalized: AuthorityWindowConsumeInput = {
+      windowId: body.windowId,
+      claimantAgentClientId: body.claimantAgentClientId ?? body.agentId ?? ''
+    };
+    return this.authorityService.consumeAuthorityWindow(normalized);
   }
 
   @Post('window/replay-attempt')
-  async replayAttempt(@Body() body: AuthorityWindowReplayAttemptInput) {
-    return this.authorityService.replayAttempt(body);
+  async replayAttempt(@Body() body: AuthorityWindowReplayAttemptInput & { agentId?: string }) {
+    const normalized: AuthorityWindowReplayAttemptInput = {
+      windowId: body.windowId,
+      claimantAgentClientId: body.claimantAgentClientId ?? body.agentId ?? ''
+    };
+    return this.authorityService.replayAttempt(normalized);
+  }
+
+  @Get('window/:windowId')
+  async getWindow(@Param('windowId') windowId: string) {
+    return this.authorityService.getWindow(windowId);
+  }
+
+  @Get('ledger/:workflowId')
+  async getWorkflowLedger(@Param('workflowId') workflowId: string) {
+    return this.authorityService.getWorkflowLedger(workflowId);
   }
 }

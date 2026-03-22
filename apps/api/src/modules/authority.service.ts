@@ -159,18 +159,6 @@ export class AuthorityService implements OnModuleInit {
       }
     });
 
-    await this.ledgerRepository.appendEvent({
-      workflowId: input.workflowId,
-      eventType: 'authority_window_issued',
-      payload: {
-        windowId,
-        actionScope: input.actionScope,
-        boundAgentClientId: input.boundAgentClientId,
-        approverRole: approver.role,
-        approverIdentity: approver.userId
-      }
-    });
-
     return {
       windowId: window.window_id,
       workflowId: window.workflow_id,
@@ -234,6 +222,16 @@ export class AuthorityService implements OnModuleInit {
         claimantAgentClientId: input.claimantAgentClientId,
         expiresAt: new Date(claimed.expires_at).toISOString(),
         tokenTtlSeconds: minted.expiresIn
+      }
+    });
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: claimed.workflow_id,
+      eventType: 'authority_window_issued',
+      payload: {
+        windowId: claimed.window_id,
+        actionScope: claimed.action_scope,
+        boundAgentClientId: claimed.bound_agent_client_id
       }
     });
 
@@ -321,6 +319,31 @@ export class AuthorityService implements OnModuleInit {
     });
   }
 
+  async getWindow(windowId: string) {
+    const window = await this.authorityWindowRepository.findWindow(windowId);
+    if (!window) {
+      throw new ForbiddenException({ reason: 'Authority window does not exist' });
+    }
+
+    return {
+      windowId: window.window_id,
+      workflowId: window.workflow_id,
+      actionScope: window.action_scope,
+      boundAgentClientId: window.bound_agent_client_id,
+      claimantAgentClientId: window.claimant_agent_client_id,
+      status: window.status,
+      expiresAt: new Date(window.expires_at).toISOString(),
+      claimedAt: window.claimed_at ? new Date(window.claimed_at).toISOString() : null,
+      consumedAt: window.consumed_at ? new Date(window.consumed_at).toISOString() : null,
+      revokedAt: window.revoked_at ? new Date(window.revoked_at).toISOString() : null,
+      createdAt: new Date(window.created_at).toISOString()
+    };
+  }
+
+  async getWorkflowLedger(workflowId: string) {
+    return this.ledgerRepository.listByWorkflowId(workflowId);
+  }
+
   async checkHighRiskAction(input: HighRiskAuthorityCheckInput): Promise<AuthorityCheckResponse> {
     const decision = await this.auth0AuthorityService.checkExecutionAuthority(input.actionScope, input.authorityWindowToken);
 
@@ -394,7 +417,13 @@ export class AuthorityService implements OnModuleInit {
   }
 
   private buildBindingMessage(input: AuthorityWindowRequestInput): string {
-    const amountPart = input.actionScope === 'execute:refund' ? `amount=${input.amount}` : `scope=${input.actionScope}`;
-    return `customer=${input.customerId}; action=${input.actionScope}; ${amountPart}; requesting_agent=${input.requestingAgentClientId}`;
+    const actionPart = input.actionScope === 'execute:refund' ? 'refund' : 'data_deletion';
+    const valuePart = input.actionScope === 'execute:refund' ? `amt:${input.amount}` : `scp:${input.actionScope}`;
+    const requester = input.requestingAgentClientId.length > 12
+      ? input.requestingAgentClientId.slice(0, 12)
+      : input.requestingAgentClientId;
+
+    const bindingMessage = `cid:${input.customerId} act:${actionPart} ${valuePart} req:${requester}`;
+    return bindingMessage.length > 64 ? bindingMessage.slice(0, 64) : bindingMessage;
   }
 }

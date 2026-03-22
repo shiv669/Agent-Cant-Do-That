@@ -152,8 +152,12 @@ export class Auth0AuthorityService {
     const body = new URLSearchParams({
       client_id: clientId,
       client_secret: clientSecret,
-      scope: input.actionScope,
-      login_hint: `user_id:${input.approverUserId}`,
+      scope: `openid ${input.actionScope}`,
+      login_hint: JSON.stringify({
+        format: 'iss_sub',
+        iss: `https://${domain}/`,
+        sub: input.approverUserId
+      }),
       binding_message: input.bindingMessage
     });
 
