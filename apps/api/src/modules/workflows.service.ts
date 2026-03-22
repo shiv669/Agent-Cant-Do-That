@@ -1,16 +1,21 @@
 import { Injectable } from '@nestjs/common';
 import { Client, Connection } from '@temporalio/client';
+import { LedgerRepository } from './ledger.repository';
 import type {
   LedgerEvent,
   StartOffboardingInput,
   StartOffboardingResponse,
   WorkflowStatusResponse
 } from '@contracts/index';
+import type { OnModuleInit } from '@nestjs/common';
 
 @Injectable()
-export class WorkflowsService {
-  private readonly eventsByWorkflowId = new Map<string, LedgerEvent[]>();
-  private nextSeqId = 1;
+export class WorkflowsService implements OnModuleInit {
+  constructor(private readonly ledgerRepository: LedgerRepository) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.ledgerRepository.ensureSchema();
+  }
 
   private async getTemporalClient(): Promise<Client> {
     const address = process.env.TEMPORAL_ADDRESS ?? 'localhost:7233';
@@ -20,18 +25,12 @@ export class WorkflowsService {
     return new Client({ connection, namespace });
   }
 
-  private appendEvent(workflowId: string, eventType: LedgerEvent['eventType'], payload: Record<string, unknown>) {
-    const event: LedgerEvent = {
-      seqId: this.nextSeqId++,
+  private async appendEvent(workflowId: string, eventType: LedgerEvent['eventType'], payload: Record<string, unknown>) {
+    await this.ledgerRepository.appendEvent({
       workflowId,
       eventType,
-      createdAt: new Date().toISOString(),
       payload
-    };
-
-    const current = this.eventsByWorkflowId.get(workflowId) ?? [];
-    current.push(event);
-    this.eventsByWorkflowId.set(workflowId, current);
+    });
   }
 
   async startOffboarding(input: StartOffboardingInput): Promise<StartOffboardingResponse> {
@@ -45,7 +44,7 @@ export class WorkflowsService {
       args: [input]
     });
 
-    this.appendEvent(workflowId, 'authorization_blocked', {
+    await this.appendEvent(workflowId, 'authorization_blocked', {
       reason: 'Initial high-risk placeholder state from workflow scaffold',
       actionScope: 'execute:refund'
     });
@@ -65,6 +64,6 @@ export class WorkflowsService {
   }
 
   async getLedger(workflowId: string): Promise<LedgerEvent[]> {
-    return this.eventsByWorkflowId.get(workflowId) ?? [];
+    return this.ledgerRepository.listByWorkflowId(workflowId);
   }
 }

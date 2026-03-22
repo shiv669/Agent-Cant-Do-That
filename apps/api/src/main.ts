@@ -1,5 +1,15 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { config as loadEnv } from 'dotenv';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './modules/app.module';
+
+const workspaceEnvPath = resolve(process.cwd(), '../../.env');
+if (existsSync(workspaceEnvPath)) {
+  loadEnv({ path: workspaceEnvPath });
+} else {
+  loadEnv();
+}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
