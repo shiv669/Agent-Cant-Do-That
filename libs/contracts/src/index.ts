@@ -4,6 +4,9 @@ export type ActionScope =
   | 'execute:data_deletion';
 
 export type LedgerEventType =
+  | 'revoke_sso_access_completed'
+  | 'billing_history_exported'
+  | 'subscriptions_cancelled'
   | 'customer_validation_passed'
   | 'data_stores_enumerated'
   | 'compliance_check_passed'
@@ -21,6 +24,7 @@ export type LedgerEventType =
   | 'authority_window_consumed'
   | 'authority_token_revoked'
   | 'replay_attempt_blocked'
+  | 'cross_action_propagation_check_passed'
   | 'cross_action_propagation_denied';
 
 export type WorkflowStatus =

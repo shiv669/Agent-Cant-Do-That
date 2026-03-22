@@ -8,6 +8,21 @@ const apiBase = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4001';
 
 const progressionSteps = [
   {
+    eventType: 'revoke_sso_access_completed',
+    pending: 'REVOKING SSO ACCESS...',
+    done: 'SSO ACCESS REVOKED        ✓'
+  },
+  {
+    eventType: 'billing_history_exported',
+    pending: 'EXPORTING BILLING HISTORY...',
+    done: 'BILLING HISTORY EXPORTED  ✓'
+  },
+  {
+    eventType: 'subscriptions_cancelled',
+    pending: 'CANCELLING SUBSCRIPTIONS...',
+    done: 'SUBSCRIPTIONS CANCELLED   ✓'
+  },
+  {
     eventType: 'customer_validation_passed',
     pending: 'VALIDATING CUSTOMER...',
     done: '✓ Customer ENT-00441 active'
@@ -171,7 +186,7 @@ export default function HomePage() {
 
                 const complete = stepCompletion[index];
                 return (
-                  <p key={step.eventType} className={complete ? 'text-emerald-700' : 'text-slate-700'}>
+                  <p key={step.eventType} className={complete ? 'whitespace-pre text-emerald-700' : 'whitespace-pre text-slate-700'}>
                     {complete ? step.done : step.pending}
                   </p>
                 );

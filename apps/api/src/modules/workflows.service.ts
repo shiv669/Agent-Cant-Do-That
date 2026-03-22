@@ -48,6 +48,21 @@ export class WorkflowsService implements OnModuleInit {
       args: [input]
     });
 
+    await this.sleep(500);
+    await this.appendEvent(workflowId, 'revoke_sso_access_completed', {
+      provider: 'enterprise_sso'
+    });
+
+    await this.sleep(500);
+    await this.appendEvent(workflowId, 'billing_history_exported', {
+      exportFormat: 'csv'
+    });
+
+    await this.sleep(500);
+    await this.appendEvent(workflowId, 'subscriptions_cancelled', {
+      cancelledCount: 3
+    });
+
     await this.sleep(1500);
     await this.appendEvent(workflowId, 'customer_validation_passed', {
       customerId: input.customerId,

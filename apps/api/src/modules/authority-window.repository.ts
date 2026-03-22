@@ -93,6 +93,26 @@ export class AuthorityWindowRepository {
     return result.rows[0] ?? null;
   }
 
+  async findLatestConsumedWindowByWorkflowAndScope(input: {
+    workflowId: string;
+    actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
+  }): Promise<AuthorityWindowRecord | null> {
+    const result = await this.pool.query<AuthorityWindowRecord>(
+      `
+        SELECT *
+        FROM authority_windows
+        WHERE workflow_id = $1
+          AND action_scope = $2
+          AND status IN ('consumed', 'revoked')
+        ORDER BY COALESCE(revoked_at, consumed_at, created_at) DESC
+        LIMIT 1;
+      `,
+      [input.workflowId, input.actionScope]
+    );
+
+    return result.rows[0] ?? null;
+  }
+
   async markClaimed(input: {
     windowId: string;
     claimantAgentClientId: string;

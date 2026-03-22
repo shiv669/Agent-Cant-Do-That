@@ -40,6 +40,23 @@ export class AuthorityService implements OnModuleInit {
 
     const bindingMessage = this.buildBindingMessage(input);
 
+    if (input.actionScope === 'execute:data_deletion') {
+      const previousRefundWindow = await this.authorityWindowRepository.findLatestConsumedWindowByWorkflowAndScope({
+        workflowId: input.workflowId,
+        actionScope: 'execute:refund'
+      });
+
+      await this.ledgerRepository.appendEvent({
+        workflowId: input.workflowId,
+        eventType: 'high_risk_action_blocked',
+        payload: {
+          actionScope: input.actionScope,
+          reason: 'Authority window absent - execution blocked',
+          previousWindowId: previousRefundWindow?.window_id ?? 'unknown'
+        }
+      });
+    }
+
     await this.ledgerRepository.appendEvent({
       workflowId: input.workflowId,
       eventType: 'step_up_requested',
@@ -286,6 +303,23 @@ export class AuthorityService implements OnModuleInit {
         revokedAt: new Date(revoked.revoked_at ?? new Date()).toISOString()
       }
     });
+
+    if (consumed.action_scope === 'execute:data_deletion') {
+      const previousRefundWindow = await this.authorityWindowRepository.findLatestConsumedWindowByWorkflowAndScope({
+        workflowId: consumed.workflow_id,
+        actionScope: 'execute:refund'
+      });
+
+      await this.ledgerRepository.appendEvent({
+        workflowId: consumed.workflow_id,
+        eventType: 'cross_action_propagation_check_passed',
+        payload: {
+          previousWindowId: previousRefundWindow?.window_id ?? 'unknown',
+          newWindowRequired: true,
+          authorityCarriedForward: false
+        }
+      });
+    }
 
     return {
       windowId: revoked.window_id,

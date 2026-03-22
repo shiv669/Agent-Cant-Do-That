@@ -31,6 +31,9 @@ function summarizeEvent(event: LedgerEvent): string {
   const payload = asPayload(event.payload);
 
   const keysByType: Record<string, string[]> = {
+    revoke_sso_access_completed: ['provider'],
+    billing_history_exported: ['exportFormat'],
+    subscriptions_cancelled: ['cancelledCount'],
     customer_validation_passed: ['customerId', 'status'],
     data_stores_enumerated: ['storeCount'],
     compliance_check_passed: ['legalHolds', 'offboardingPermitted'],
@@ -45,7 +48,8 @@ function summarizeEvent(event: LedgerEvent): string {
     authority_window_issued: ['windowId', 'boundAgentClientId'],
     authority_window_consumed: ['windowId', 'claimantAgentClientId'],
     authority_token_revoked: ['windowId', 'revokedAt'],
-    replay_attempt_blocked: ['windowId', 'status']
+    replay_attempt_blocked: ['windowId', 'status'],
+    cross_action_propagation_check_passed: ['previousWindowId', 'newWindowRequired', 'authorityCarriedForward']
   };
 
   const selectedKeys = keysByType[event.eventType] ?? Object.keys(payload).slice(0, 3);
