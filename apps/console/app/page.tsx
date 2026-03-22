@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 import type {
   AuthorityWindowClaimResponse,
+  AuthorityWindowRequestResponse,
   LedgerEvent,
   StartOffboardingResponse,
   WorkflowStatusResponse
@@ -17,6 +18,7 @@ type HighRiskAction = 'execute:refund' | 'execute:data_deletion';
 type ActionUiState = {
   escalationRecorded: boolean;
   awaitingStepUp: boolean;
+  requestExpiresAt: string | null;
   claim: AuthorityWindowClaimResponse | null;
   executeComplete: boolean;
 };
@@ -24,6 +26,7 @@ type ActionUiState = {
 const emptyActionState: ActionUiState = {
   escalationRecorded: false,
   awaitingStepUp: false,
+  requestExpiresAt: null,
   claim: null,
   executeComplete: false
 };
@@ -86,6 +89,7 @@ export default function HomePage() {
   const [ledger, setLedger] = useState<LedgerEvent[]>([]);
   const [uiStatus, setUiStatus] = useState<string>('idle');
   const [nowMs, setNowMs] = useState(Date.now());
+  const [panelAction, setPanelAction] = useState<HighRiskAction | null>(null);
   const [actionStates, setActionStates] = useState<Record<HighRiskAction, ActionUiState>>({
     'execute:refund': { ...emptyActionState },
     'execute:data_deletion': { ...emptyActionState }
@@ -152,6 +156,7 @@ export default function HomePage() {
         'execute:refund': { ...emptyActionState },
         'execute:data_deletion': { ...emptyActionState }
       });
+      setPanelAction(null);
 
       const ledgerResponse = await fetch(`${apiBase}/api/authority/ledger/${data.workflowId}`);
       if (ledgerResponse.ok) {
@@ -211,6 +216,7 @@ export default function HomePage() {
 
     setError(null);
     setUiStatus('awaiting-step-up-approval');
+    setPanelAction(action);
     setIsEscalating(true);
     setActionStates((prev) => ({
       ...prev,
@@ -248,7 +254,15 @@ export default function HomePage() {
         throw new Error(`Step-up request failed (${requestResponse.status})`);
       }
 
-      const requestData = (await requestResponse.json()) as { windowId: string };
+      const requestData = (await requestResponse.json()) as AuthorityWindowRequestResponse;
+
+      setActionStates((prev) => ({
+        ...prev,
+        [action]: {
+          ...prev[action],
+          requestExpiresAt: requestData.expiresAt
+        }
+      }));
 
       const claimResponse = await fetch(`${apiBase}/api/authority/window/claim`, {
         method: 'POST',
@@ -331,7 +345,8 @@ export default function HomePage() {
   };
 
   const activeActionState = activeAction ? actionStates[activeAction] : null;
-  const showStepUpPanel = Boolean(activeAction && activeActionState?.escalationRecorded);
+  const panelActionState = panelAction ? actionStates[panelAction] : null;
+  const showStepUpPanel = Boolean(panelAction && panelActionState?.escalationRecorded);
   const hasEscalationLine = actionStates['execute:refund'].escalationRecorded || actionStates['execute:data_deletion'].escalationRecorded;
   const blockMessage = activeAction === 'execute:data_deletion'
     ? 'Authority window absent - data deletion blocked'
@@ -418,44 +433,44 @@ export default function HomePage() {
               </button>
             ) : null}
 
-            {showStepUpPanel && activeActionState ? (
+            {showStepUpPanel && panelActionState ? (
               <div className="mt-4 rounded border border-secondary_light bg-slate-50 p-3 text-sm text-slate-800">
-                {activeActionState.awaitingStepUp ? (
+                {panelActionState.awaitingStepUp ? (
                   <div className="space-y-1">
-                    <p>Action: {activeAction === 'execute:refund' ? 'Cross-border refund execution' : 'Cross-border data deletion execution'}</p>
+                    <p>Action: {panelAction === 'execute:refund' ? 'Cross-border refund execution' : 'Cross-border data deletion execution'}</p>
                     <p>Customer: {customerId}</p>
-                    <p>Amount: {activeAction === 'execute:refund' ? '$82,450' : 'N/A'}</p>
-                    <p>Required approver: {activeAction === 'execute:refund' ? 'CFO' : 'DPO'}</p>
+                    <p>Amount: {panelAction === 'execute:refund' ? '$82,450' : 'N/A'}</p>
+                    <p>Required approver: {panelAction === 'execute:refund' ? 'CFO' : 'DPO'}</p>
                     <p>Status: Step-up dispatched</p>
-                    <p>Authority window expires: {countdownFrom(activeActionState.claim?.expiresAt, nowMs)}</p>
+                    <p>Authority window expires: {countdownFrom(panelActionState.requestExpiresAt ?? undefined, nowMs)}</p>
                   </div>
                 ) : null}
 
-                {!activeActionState.awaitingStepUp && activeActionState.claim ? (
+                {!panelActionState.awaitingStepUp && panelActionState.claim ? (
                   <div className="space-y-2">
                     <p>Authority window received</p>
-                    <p>Scope: {activeActionState.claim.actionScope}</p>
+                    <p>Scope: {panelActionState.claim.actionScope}</p>
                     <p>Token TTL: 120 seconds</p>
                     <p>Bound to: subagent-d only</p>
                     <p>&quot;This authority cannot be transferred, extended, or reused.&quot;</p>
-                    {!activeActionState.executeComplete ? (
+                    {!panelActionState.executeComplete ? (
                       <button
                         className="rounded border border-primary px-4 py-2 text-primary"
                         disabled={isExecuting}
                         onClick={() => {
-                          if (activeAction) {
-                            void executeHighRiskAction(activeAction);
+                          if (panelAction) {
+                            void executeHighRiskAction(panelAction);
                           }
                         }}
                         type="button"
                       >
-                        {activeAction === 'execute:refund' ? 'Execute Refund' : 'Execute Deletion'}
+                        {panelAction === 'execute:refund' ? 'Execute Refund' : 'Execute Deletion'}
                       </button>
                     ) : null}
                   </div>
                 ) : null}
 
-                {activeActionState.executeComplete ? <p>Execution complete. Authority consumed.</p> : null}
+                {panelActionState.executeComplete ? <p>Execution complete. Authority consumed.</p> : null}
               </div>
             ) : null}
           </div>

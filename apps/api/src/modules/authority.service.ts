@@ -41,20 +41,32 @@ export class AuthorityService implements OnModuleInit {
     const bindingMessage = this.buildBindingMessage(input);
 
     if (input.actionScope === 'execute:data_deletion') {
+      const existingEvents = await this.ledgerRepository.listByWorkflowId(input.workflowId);
+      const hasDeletionBlock = existingEvents.some((event) => {
+        if (event.eventType !== 'high_risk_action_blocked') {
+          return false;
+        }
+
+        const payload = event.payload as Record<string, unknown>;
+        return payload.actionScope === 'execute:data_deletion';
+      });
+
       const previousRefundWindow = await this.authorityWindowRepository.findLatestConsumedWindowByWorkflowAndScope({
         workflowId: input.workflowId,
         actionScope: 'execute:refund'
       });
 
-      await this.ledgerRepository.appendEvent({
-        workflowId: input.workflowId,
-        eventType: 'high_risk_action_blocked',
-        payload: {
-          actionScope: input.actionScope,
-          reason: 'Authority window absent - execution blocked',
-          previousWindowId: previousRefundWindow?.window_id ?? 'unknown'
-        }
-      });
+      if (!hasDeletionBlock) {
+        await this.ledgerRepository.appendEvent({
+          workflowId: input.workflowId,
+          eventType: 'high_risk_action_blocked',
+          payload: {
+            actionScope: input.actionScope,
+            reason: 'Authority window absent - execution blocked',
+            previousWindowId: previousRefundWindow?.window_id ?? 'unknown'
+          }
+        });
+      }
     }
 
     await this.ledgerRepository.appendEvent({
