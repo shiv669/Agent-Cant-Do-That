@@ -7,6 +7,10 @@ export type LedgerEventType =
   | 'high_risk_action_blocked'
   | 'authorization_blocked'
   | 'unauthorized_escalation_attempt_recorded'
+  | 'step_up_requested'
+  | 'step_up_approved'
+  | 'step_up_denied'
+  | 'step_up_timeout'
   | 'authority_window_requested'
   | 'authority_window_issued'
   | 'authority_window_claimed'
@@ -64,8 +68,11 @@ export type AuthorityWindowStatus = 'requested' | 'claimed' | 'consumed' | 'revo
 
 export interface AuthorityWindowRequestInput {
   workflowId: string;
+  customerId: string;
   actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
+  requestingAgentClientId: string;
   boundAgentClientId: string;
+  amount?: number;
   ttlSeconds?: number;
 }
 

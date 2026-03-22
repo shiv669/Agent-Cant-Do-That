@@ -29,6 +29,110 @@ export class AuthorityService implements OnModuleInit {
   }
 
   async requestAuthorityWindow(input: AuthorityWindowRequestInput): Promise<AuthorityWindowRequestResponse> {
+    if (input.actionScope === 'execute:refund' && typeof input.amount !== 'number') {
+      throw new ForbiddenException({ reason: 'Refund requests must include amount for CIBA binding message' });
+    }
+
+    const approver = this.getApproverForScope(input.actionScope);
+    if (!approver.userId) {
+      throw new ForbiddenException({ reason: `Missing ${approver.role.toUpperCase()}_USER_ID for step-up routing` });
+    }
+
+    const bindingMessage = this.buildBindingMessage(input);
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: input.workflowId,
+      eventType: 'step_up_requested',
+      payload: {
+        actionScope: input.actionScope,
+        approverRole: approver.role,
+        approverUserId: approver.userId,
+        bindingMessage
+      }
+    });
+
+    let cibaRequest: { authReqId: string; interval: number; expiresIn: number };
+    try {
+      cibaRequest = await this.auth0AuthorityService.requestCibaApproval({
+        actionScope: input.actionScope,
+        approverUserId: approver.userId,
+        bindingMessage
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Step-up request failed';
+      await this.ledgerRepository.appendEvent({
+        workflowId: input.workflowId,
+        eventType: 'step_up_denied',
+        payload: {
+          actionScope: input.actionScope,
+          approverRole: approver.role,
+          approverUserId: approver.userId,
+          reason
+        }
+      });
+
+      throw new ForbiddenException({
+        workflowId: input.workflowId,
+        actionScope: input.actionScope,
+        reason
+      });
+    }
+
+    const cibaResult = await this.auth0AuthorityService.pollCibaApproval({
+      authReqId: cibaRequest.authReqId,
+      intervalSeconds: cibaRequest.interval,
+      maxWaitSeconds: cibaRequest.expiresIn
+    });
+
+    if (cibaResult.status === 'denied') {
+      await this.ledgerRepository.appendEvent({
+        workflowId: input.workflowId,
+        eventType: 'step_up_denied',
+        payload: {
+          actionScope: input.actionScope,
+          approverRole: approver.role,
+          approverUserId: approver.userId,
+          reason: cibaResult.reason
+        }
+      });
+
+      throw new ForbiddenException({
+        workflowId: input.workflowId,
+        actionScope: input.actionScope,
+        reason: cibaResult.reason
+      });
+    }
+
+    if (cibaResult.status === 'timeout') {
+      await this.ledgerRepository.appendEvent({
+        workflowId: input.workflowId,
+        eventType: 'step_up_timeout',
+        payload: {
+          actionScope: input.actionScope,
+          approverRole: approver.role,
+          approverUserId: approver.userId,
+          reason: cibaResult.reason
+        }
+      });
+
+      throw new ForbiddenException({
+        workflowId: input.workflowId,
+        actionScope: input.actionScope,
+        reason: cibaResult.reason
+      });
+    }
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: input.workflowId,
+      eventType: 'step_up_approved',
+      payload: {
+        actionScope: input.actionScope,
+        approverRole: approver.role,
+        approverIdentity: approver.userId,
+        approvedAt: cibaResult.approvedAt
+      }
+    });
+
     const ttlSeconds = Math.min(Math.max(input.ttlSeconds ?? 120, 30), 300);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
@@ -52,6 +156,18 @@ export class AuthorityService implements OnModuleInit {
         boundAgentClientId: input.boundAgentClientId,
         ttlSeconds,
         expiresAt: expiresAt.toISOString()
+      }
+    });
+
+    await this.ledgerRepository.appendEvent({
+      workflowId: input.workflowId,
+      eventType: 'authority_window_issued',
+      payload: {
+        windowId,
+        actionScope: input.actionScope,
+        boundAgentClientId: input.boundAgentClientId,
+        approverRole: approver.role,
+        approverIdentity: approver.userId
       }
     });
 
@@ -118,16 +234,6 @@ export class AuthorityService implements OnModuleInit {
         claimantAgentClientId: input.claimantAgentClientId,
         expiresAt: new Date(claimed.expires_at).toISOString(),
         tokenTtlSeconds: minted.expiresIn
-      }
-    });
-
-    await this.ledgerRepository.appendEvent({
-      workflowId: claimed.workflow_id,
-      eventType: 'authority_window_issued',
-      payload: {
-        windowId: claimed.window_id,
-        actionScope: claimed.action_scope,
-        boundAgentClientId: claimed.bound_agent_client_id
       }
     });
 
@@ -271,5 +377,24 @@ export class AuthorityService implements OnModuleInit {
       actionScope: input.actionScope,
       authority: 'granted'
     };
+  }
+
+  private getApproverForScope(scope: AuthorityWindowRequestInput['actionScope']): { role: 'cfo' | 'dpo'; userId: string } {
+    if (scope === 'execute:refund') {
+      return {
+        role: 'cfo',
+        userId: process.env.CFO_USER_ID ?? ''
+      };
+    }
+
+    return {
+      role: 'dpo',
+      userId: process.env.DPO_USER_ID ?? ''
+    };
+  }
+
+  private buildBindingMessage(input: AuthorityWindowRequestInput): string {
+    const amountPart = input.actionScope === 'execute:refund' ? `amount=${input.amount}` : `scope=${input.actionScope}`;
+    return `customer=${input.customerId}; action=${input.actionScope}; ${amountPart}; requesting_agent=${input.requestingAgentClientId}`;
   }
 }

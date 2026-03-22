@@ -12,6 +12,17 @@ type MintedToken = {
   expiresIn: number;
 };
 
+type CibaAuthorizeResponse = {
+  authReqId: string;
+  expiresIn: number;
+  interval: number;
+};
+
+type CibaPollResult =
+  | { status: 'approved'; approvedAt: string }
+  | { status: 'denied'; reason: string }
+  | { status: 'timeout'; reason: string };
+
 @Injectable()
 export class Auth0AuthorityService {
   private getTokenClientConfig() {
@@ -125,6 +136,135 @@ export class Auth0AuthorityService {
     if (!response.ok) {
       const text = await response.text();
       throw new Error(text || 'Auth0 token revoke request failed');
+    }
+  }
+
+  async requestCibaApproval(input: {
+    actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
+    approverUserId: string;
+    bindingMessage: string;
+  }): Promise<CibaAuthorizeResponse> {
+    const { domain, clientId, clientSecret } = this.getTokenClientConfig();
+    if (!domain || !clientId || !clientSecret) {
+      throw new Error('Missing Auth0 CIBA configuration');
+    }
+
+    const body = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: input.actionScope,
+      login_hint: `user_id:${input.approverUserId}`,
+      binding_message: input.bindingMessage
+    });
+
+    const response = await fetch(`https://${domain}/bc-authorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+
+    const payload = await this.readJson<{ 
+      auth_req_id?: string;
+      expires_in?: number;
+      interval?: number;
+      error?: string;
+      error_description?: string;
+    }>(response);
+
+    if (!response.ok || !payload.auth_req_id) {
+      throw new Error(payload.error_description ?? payload.error ?? 'Auth0 CIBA authorize failed');
+    }
+
+    return {
+      authReqId: payload.auth_req_id,
+      expiresIn: payload.expires_in ?? 120,
+      interval: payload.interval ?? 2
+    };
+  }
+
+  async pollCibaApproval(input: {
+    authReqId: string;
+    intervalSeconds: number;
+    maxWaitSeconds?: number;
+  }): Promise<CibaPollResult> {
+    const { domain, clientId, clientSecret } = this.getTokenClientConfig();
+    if (!domain || !clientId || !clientSecret) {
+      throw new Error('Missing Auth0 CIBA poll configuration');
+    }
+
+    const timeoutSeconds = input.maxWaitSeconds ?? Number(process.env.AUTH0_CIBA_TIMEOUT_SECONDS ?? 120);
+    const start = Date.now();
+
+    while ((Date.now() - start) / 1000 < timeoutSeconds) {
+      const body = new URLSearchParams({
+        grant_type: 'urn:openid:params:grant-type:ciba',
+        auth_req_id: input.authReqId,
+        client_id: clientId,
+        client_secret: clientSecret
+      });
+
+      const response = await fetch(`https://${domain}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+      });
+
+      const payload = await this.readJson<{
+        access_token?: string;
+        error?: string;
+        error_description?: string;
+      }>(response);
+
+      if (response.ok && payload.access_token) {
+        return {
+          status: 'approved',
+          approvedAt: new Date().toISOString()
+        };
+      }
+
+      const err = payload.error ?? '';
+      if (err === 'authorization_pending' || err === 'slow_down') {
+        const sleepMs = (err === 'slow_down' ? input.intervalSeconds + 2 : input.intervalSeconds) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, sleepMs));
+        continue;
+      }
+
+      if (err === 'access_denied') {
+        return {
+          status: 'denied',
+          reason: payload.error_description ?? 'Step-up denied by approver'
+        };
+      }
+
+      if (err === 'expired_token') {
+        return {
+          status: 'timeout',
+          reason: payload.error_description ?? 'Step-up request expired'
+        };
+      }
+
+      return {
+        status: 'denied',
+        reason: payload.error_description ?? err ?? 'Step-up failed'
+      };
+    }
+
+    return {
+      status: 'timeout',
+      reason: 'Step-up approval timed out'
+    };
+  }
+
+  private async readJson<T>(response: Response): Promise<T> {
+    const raw = await response.text();
+    if (!raw) {
+      return {} as T;
+    }
+
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return { error_description: raw } as T;
     }
   }
 }
