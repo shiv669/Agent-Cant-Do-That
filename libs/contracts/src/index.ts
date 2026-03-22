@@ -4,6 +4,7 @@ export type ActionScope =
   | 'execute:data_deletion';
 
 export type LedgerEventType =
+  | 'high_risk_action_blocked'
   | 'authorization_blocked'
   | 'unauthorized_escalation_attempt_recorded'
   | 'authority_window_issued'
@@ -39,4 +40,20 @@ export interface LedgerEvent {
 
 export interface StartOffboardingResponse extends WorkflowStatusResponse {
   customerId: string;
+}
+
+export interface HighRiskAuthorityCheckInput {
+  workflowId: string;
+  actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
+  authorityWindowToken?: string;
+}
+
+export interface EscalationAttemptInput extends HighRiskAuthorityCheckInput {
+  reason?: string;
+}
+
+export interface AuthorityCheckResponse {
+  workflowId: string;
+  actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
+  authority: 'granted' | 'denied';
 }
