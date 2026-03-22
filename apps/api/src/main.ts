@@ -14,9 +14,17 @@ if (existsSync(workspaceEnvPath)) {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001'];
+
   app.setGlobalPrefix('api');
   app.enableCors({
-    origin: 'http://localhost:3000',
+    origin: (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error('Origin not allowed by CORS'));
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     credentials: true
   });
