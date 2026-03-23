@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import type { StartOffboardingInput } from '@contracts/index';
 import { WorkflowsService } from './workflows.service';
 
@@ -7,8 +7,18 @@ export class WorkflowsController {
   constructor(private readonly workflowsService: WorkflowsService) {}
 
   @Post('offboarding/start')
-  async startOffboarding(@Body() body: StartOffboardingInput) {
-    return this.workflowsService.startOffboarding(body);
+  async startOffboarding(
+    @Body() body: StartOffboardingInput & { opsSubjectToken?: string },
+    @Req() req: { headers: Record<string, string | string[] | undefined> }
+  ) {
+    const authHeader = req.headers.authorization;
+    const headerValue = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+    const tokenFromHeader = headerValue?.startsWith('Bearer ') ? headerValue.slice('Bearer '.length).trim() : undefined;
+
+    return this.workflowsService.startOffboarding({
+      ...body,
+      opsSubjectToken: body.opsSubjectToken ?? tokenFromHeader
+    } as StartOffboardingInput);
   }
 
   @Get(':workflowId/status')

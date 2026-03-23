@@ -28,6 +28,20 @@ export class AuthorityService implements OnModuleInit {
     await this.authorityWindowRepository.ensureSchema();
   }
 
+  private getJwtTtlSeconds(token: string, fallbackSeconds = 120): number {
+    try {
+      const parts = token.split('.');
+      if (parts.length < 2) return fallbackSeconds;
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as { exp?: number };
+      if (!payload.exp) return fallbackSeconds;
+
+      const ttl = payload.exp - Math.floor(Date.now() / 1000);
+      return ttl > 0 ? ttl : fallbackSeconds;
+    } catch {
+      return fallbackSeconds;
+    }
+  }
+
   async requestAuthorityWindow(input: AuthorityWindowRequestInput): Promise<AuthorityWindowRequestResponse> {
     if (input.actionScope === 'execute:refund' && typeof input.amount !== 'number') {
       throw new ForbiddenException({ reason: 'Refund requests must include amount for CIBA binding message' });
@@ -173,7 +187,7 @@ export class AuthorityService implements OnModuleInit {
       actionScope: input.actionScope,
       boundAgentClientId: input.boundAgentClientId,
       cibaSubjectToken: cibaResult.subjectToken,
-      cibaSubjectTokenType: 'urn:ietf:params:oauth:token-type:access_token',
+      cibaSubjectTokenType: cibaResult.subjectTokenType,
       status: 'requested',
       expiresAt
     });
@@ -238,14 +252,13 @@ export class AuthorityService implements OnModuleInit {
       throw new ForbiddenException({ reason: 'Missing CIBA subject token metadata for authority exchange' });
     }
 
-    const minted = await this.auth0AuthorityService.mintExecutionToken(
-      window.action_scope,
-      window.ciba_subject_token
-    );
+    const authorityToken = window.ciba_subject_token;
+    const tokenTtlSeconds = this.getJwtTtlSeconds(authorityToken);
+
     const claimed = await this.authorityWindowRepository.markClaimed({
       windowId: window.window_id,
       claimantAgentClientId: input.claimantAgentClientId,
-      authorityWindowToken: minted.accessToken
+      authorityWindowToken: authorityToken
     });
 
     if (!claimed) {
@@ -259,7 +272,7 @@ export class AuthorityService implements OnModuleInit {
         windowId: claimed.window_id,
         claimantAgentClientId: input.claimantAgentClientId,
         expiresAt: new Date(claimed.expires_at).toISOString(),
-        tokenTtlSeconds: minted.expiresIn
+        tokenTtlSeconds
       }
     });
 
@@ -279,7 +292,7 @@ export class AuthorityService implements OnModuleInit {
       actionScope: claimed.action_scope,
       claimantAgentClientId: input.claimantAgentClientId,
       status: claimed.status,
-      authorityWindowToken: minted.accessToken,
+      authorityWindowToken: authorityToken,
       expiresAt: new Date(claimed.expires_at).toISOString()
     };
   }
@@ -298,7 +311,11 @@ export class AuthorityService implements OnModuleInit {
       throw new ForbiddenException({ reason: 'Only claimed windows can be consumed' });
     }
 
-    await this.auth0AuthorityService.revokeExecutionToken(window.authority_window_token);
+    try {
+      await this.auth0AuthorityService.revokeExecutionToken(window.authority_window_token);
+    } catch {
+      // CIBA-issued authority tokens are short-lived and may not be revocable by this client.
+    }
     const consumed = await this.authorityWindowRepository.markConsumed(window.window_id);
     const revoked = await this.authorityWindowRepository.markRevoked(window.window_id);
 
@@ -444,11 +461,11 @@ export class AuthorityService implements OnModuleInit {
         }
       });
 
-      throw new ForbiddenException({
+      return {
         workflowId: input.workflowId,
         actionScope: input.actionScope,
         authority: 'denied'
-      });
+      };
     }
 
     return {

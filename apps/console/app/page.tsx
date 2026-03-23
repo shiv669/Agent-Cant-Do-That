@@ -1,8 +1,6 @@
 'use client';
 
-import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AuthorityWindowClaimResponse,
   AuthorityWindowRequestResponse,
@@ -12,91 +10,109 @@ import type {
 } from '@contracts/index';
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4001';
+const POLL_INTERVAL_MS = 800;
 
+type UIState = 'idle' | 'executing' | 'complete';
 type HighRiskAction = 'execute:refund' | 'execute:data_deletion';
 
-type ActionUiState = {
-  escalationRecorded: boolean;
-  awaitingStepUp: boolean;
-  requestExpiresAt: string | null;
-  claim: AuthorityWindowClaimResponse | null;
-  executeComplete: boolean;
+type WindowInfo = {
+  windowId: string;
+  actionScope: HighRiskAction;
+  expiresAt?: string;
 };
 
-const emptyActionState: ActionUiState = {
-  escalationRecorded: false,
-  awaitingStepUp: false,
-  requestExpiresAt: null,
-  claim: null,
-  executeComplete: false
-};
+type ClaimByScope = Partial<Record<HighRiskAction, AuthorityWindowClaimResponse>>;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
 }
 
-function countdownFrom(expiresAt: string | undefined, nowMs: number): string {
-  if (!expiresAt) return '--:--';
-  const remainingMs = new Date(expiresAt).getTime() - nowMs;
-  if (remainingMs <= 0) return '00:00';
-  const total = Math.floor(remainingMs / 1000);
-  const mm = Math.floor(total / 60).toString().padStart(2, '0');
-  const ss = (total % 60).toString().padStart(2, '0');
+function toTime(iso: string): string {
+  const date = new Date(iso);
+  return date.toLocaleTimeString('en-GB', { hour12: false });
+}
+
+function countdown(expiresAt?: string, nowMs?: number): string {
+  if (!expiresAt || !nowMs) return '--:--';
+  const remaining = new Date(expiresAt).getTime() - nowMs;
+  if (remaining <= 0) return '00:00';
+  const seconds = Math.floor(remaining / 1000);
+  const mm = Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, '0');
+  const ss = (seconds % 60).toString().padStart(2, '0');
   return `${mm}:${ss}`;
 }
 
-const progressionSteps = [
-  {
-    eventType: 'revoke_sso_access_completed',
-    pending: 'REVOKING SSO ACCESS...',
-    done: 'SSO ACCESS REVOKED        ✓'
-  },
-  {
-    eventType: 'billing_history_exported',
-    pending: 'EXPORTING BILLING HISTORY...',
-    done: 'BILLING HISTORY EXPORTED  ✓'
-  },
-  {
-    eventType: 'subscriptions_cancelled',
-    pending: 'CANCELLING SUBSCRIPTIONS...',
-    done: 'SUBSCRIPTIONS CANCELLED   ✓'
-  },
-  {
-    eventType: 'customer_validation_passed',
-    pending: 'VALIDATING CUSTOMER...',
-    done: '✓ Customer ENT-00441 active'
-  },
-  {
-    eventType: 'data_stores_enumerated',
-    pending: 'ENUMERATING DATA STORES...',
-    done: '✓ 14 stores identified'
-  },
-  {
-    eventType: 'compliance_check_passed',
-    pending: 'CHECKING COMPLIANCE...',
-    done: '✓ No holds, cleared'
+function eventLabel(event: LedgerEvent): string {
+  const payload = asRecord(event.payload);
+  if (event.eventType === 'high_risk_action_blocked') {
+    const scope = String(payload.actionScope ?? '');
+    if (scope === 'execute:refund') {
+      return 'execution blocked: missing scope execute:refund';
+    }
+    if (scope === 'execute:data_deletion') {
+      return 'execution blocked: missing scope execute:data_deletion';
+    }
   }
-] as const;
+
+  if (event.eventType === 'unauthorized_escalation_attempt_recorded') {
+    return 'ESCALATION_ATTEMPT_RECORDED';
+  }
+
+  return event.eventType.toUpperCase();
+}
+
+function eventTone(event: LedgerEvent): string {
+  if (event.eventType === 'high_risk_action_blocked' || event.eventType === 'replay_attempt_blocked') {
+    return 'text-red-300';
+  }
+
+  if (event.eventType === 'unauthorized_escalation_attempt_recorded') {
+    return 'text-red-200';
+  }
+
+  if (
+    event.eventType === 'step_up_approved' ||
+    event.eventType === 'authority_window_claimed' ||
+    event.eventType === 'authority_window_consumed' ||
+    event.eventType === 'authority_token_revoked' ||
+    event.eventType.endsWith('_completed')
+  ) {
+    return 'text-emerald-300';
+  }
+
+  return 'text-slate-200';
+}
+
+function eventIcon(event: LedgerEvent): string {
+  if (event.eventType === 'high_risk_action_blocked' || event.eventType === 'replay_attempt_blocked') return '[x]';
+  if (event.eventType === 'unauthorized_escalation_attempt_recorded') return '[!]';
+  if (
+    event.eventType === 'step_up_requested' ||
+    event.eventType === 'authority_window_requested' ||
+    event.eventType === 'authority_window_issued'
+  ) {
+    return '[>]';
+  }
+
+  return '[+]';
+}
 
 export default function HomePage() {
-  const router = useRouter();
+  const [uiState, setUiState] = useState<UIState>('idle');
   const [customerId, setCustomerId] = useState('ENT-00441');
-  const [isLoading, setIsLoading] = useState(false);
-  const [isEscalating, setIsEscalating] = useState(false);
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [startResult, setStartResult] = useState<StartOffboardingResponse | null>(null);
-  const [status, setStatus] = useState<WorkflowStatusResponse | null>(null);
-  const [ledger, setLedger] = useState<LedgerEvent[]>([]);
-  const [uiStatus, setUiStatus] = useState<string>('idle');
-  const [nowMs, setNowMs] = useState(Date.now());
-  const [panelAction, setPanelAction] = useState<HighRiskAction | null>(null);
-  const [actionStates, setActionStates] = useState<Record<HighRiskAction, ActionUiState>>({
-    'execute:refund': { ...emptyActionState },
-    'execute:data_deletion': { ...emptyActionState }
-  });
+  const [workflowId, setWorkflowId] = useState('');
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatusResponse | null>(null);
+  const [events, setEvents] = useState<LedgerEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isRequestingAuthority, setIsRequestingAuthority] = useState(false);
+  const [isExecutingAction, setIsExecutingAction] = useState(false);
+  const [claimsByScope, setClaimsByScope] = useState<ClaimByScope>({});
+  const [nowMs, setNowMs] = useState(Date.now());
 
-  const workflowId = useMemo(() => startResult?.workflowId ?? '', [startResult]);
+  const blockRequestedRef = useRef<{ refund: boolean; deletion: boolean }>({ refund: false, deletion: false });
 
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
@@ -108,395 +124,453 @@ export default function HomePage() {
 
     let active = true;
 
-    const fetchLedger = async () => {
+    const fetchState = async () => {
       try {
-        const response = await fetch(`${apiBase}/api/authority/ledger/${workflowId}`, { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error(`Ledger load failed (${response.status})`);
+        const [statusResponse, ledgerResponse] = await Promise.all([
+          fetch(`${apiBase}/api/workflows/${workflowId}/status`, { cache: 'no-store' }),
+          fetch(`${apiBase}/api/authority/ledger/${workflowId}`, { cache: 'no-store' })
+        ]);
+
+        if (!active) return;
+
+        if (statusResponse.ok) {
+          const statusData = (await statusResponse.json()) as WorkflowStatusResponse;
+          setWorkflowStatus(statusData);
         }
 
-        const data = (await response.json()) as LedgerEvent[];
-        if (!active) return;
-        setLedger(data);
+        if (!ledgerResponse.ok) {
+          throw new Error(`Failed to load ledger (${ledgerResponse.status})`);
+        }
+
+        const ledgerData = (await ledgerResponse.json()) as LedgerEvent[];
+        setEvents(ledgerData);
+        setError(null);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : 'Failed to load ledger updates');
+        setError(err instanceof Error ? err.message : 'Failed to load live execution state');
       }
     };
 
-    fetchLedger();
-    const poll = setInterval(fetchLedger, 3000);
+    void fetchState();
+    const interval = setInterval(() => {
+      void fetchState();
+    }, POLL_INTERVAL_MS);
 
     return () => {
       active = false;
-      clearInterval(poll);
+      clearInterval(interval);
     };
   }, [workflowId]);
 
+  const windowsById = useMemo(() => {
+    const map = new Map<string, WindowInfo>();
+
+    for (const event of events) {
+      if (event.eventType !== 'authority_window_requested') continue;
+      const payload = asRecord(event.payload);
+      const windowId = typeof payload.windowId === 'string' ? payload.windowId : '';
+      const scope = payload.actionScope;
+
+      if (!windowId || (scope !== 'execute:refund' && scope !== 'execute:data_deletion')) continue;
+
+      map.set(windowId, {
+        windowId,
+        actionScope: scope,
+        expiresAt: typeof payload.expiresAt === 'string' ? payload.expiresAt : undefined
+      });
+    }
+
+    return map;
+  }, [events]);
+
+  const hasRefundBlock = useMemo(() => {
+    return events.some((event) => {
+      if (event.eventType !== 'high_risk_action_blocked') return false;
+      const payload = asRecord(event.payload);
+      return payload.actionScope === 'execute:refund';
+    });
+  }, [events]);
+
+  const hasDeletionBlock = useMemo(() => {
+    return events.some((event) => {
+      if (event.eventType !== 'high_risk_action_blocked') return false;
+      const payload = asRecord(event.payload);
+      return payload.actionScope === 'execute:data_deletion';
+    });
+  }, [events]);
+
+  const hasRefundConsumed = useMemo(() => {
+    return events.some((event) => {
+      if (event.eventType !== 'authority_window_consumed') return false;
+      const payload = asRecord(event.payload);
+      return payload.actionScope === 'execute:refund';
+    });
+  }, [events]);
+
+  const hasDeletionConsumed = useMemo(() => {
+    return events.some((event) => {
+      if (event.eventType !== 'authority_window_consumed') return false;
+      const payload = asRecord(event.payload);
+      return payload.actionScope === 'execute:data_deletion';
+    });
+  }, [events]);
+
+  const activeAction = useMemo<HighRiskAction | null>(() => {
+    if (!hasRefundConsumed) return 'execute:refund';
+    if (!hasDeletionConsumed) return 'execute:data_deletion';
+    return null;
+  }, [hasDeletionConsumed, hasRefundConsumed]);
+
+  const latestWindowByScope = useMemo(() => {
+    const latest: Partial<Record<HighRiskAction, WindowInfo>> = {};
+    for (const event of events) {
+      if (event.eventType !== 'authority_window_requested') continue;
+      const payload = asRecord(event.payload);
+      const windowId = typeof payload.windowId === 'string' ? payload.windowId : '';
+      const scope = payload.actionScope;
+      if (!windowId || (scope !== 'execute:refund' && scope !== 'execute:data_deletion')) continue;
+      latest[scope] = windowsById.get(windowId);
+    }
+
+    return latest;
+  }, [events, windowsById]);
+
+  const sidebarScope = activeAction;
+  const sidebarWindow = sidebarScope ? latestWindowByScope[sidebarScope] : undefined;
+  const sidebarClaim = sidebarScope ? claimsByScope[sidebarScope] : undefined;
+
+  const isAwaitingApproval = useMemo(() => {
+    if (!sidebarScope) return false;
+
+    const hasRequest = events.some((event) => {
+      if (event.eventType !== 'step_up_requested') return false;
+      const payload = asRecord(event.payload);
+      return payload.actionScope === sidebarScope;
+    });
+
+    const hasApproval = events.some((event) => {
+      if (event.eventType !== 'step_up_approved') return false;
+      const payload = asRecord(event.payload);
+      return payload.actionScope === sidebarScope;
+    });
+
+    return hasRequest && !hasApproval;
+  }, [events, sidebarScope]);
+
+  useEffect(() => {
+    if (!workflowId) return;
+
+    const lowRiskDone = events.some((event) => event.eventType === 'compliance_check_passed');
+    if (!lowRiskDone) return;
+
+    if (!blockRequestedRef.current.refund && !hasRefundBlock) {
+      blockRequestedRef.current.refund = true;
+      void triggerRealBlock('execute:refund');
+    }
+
+    if (hasRefundConsumed && !blockRequestedRef.current.deletion && !hasDeletionBlock) {
+      blockRequestedRef.current.deletion = true;
+      void triggerRealBlock('execute:data_deletion');
+    }
+  }, [events, hasDeletionBlock, hasRefundBlock, hasRefundConsumed, workflowId]);
+
+  useEffect(() => {
+    if (hasDeletionConsumed) {
+      setUiState('complete');
+    }
+  }, [hasDeletionConsumed]);
+
   const startWorkflow = async () => {
     setError(null);
-    setIsLoading(true);
+    setIsStarting(true);
 
     try {
       const response = await fetch(`${apiBase}/api/workflows/offboarding/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-agent-client-id': 'orchestrator-a'
+        },
         body: JSON.stringify({ customerId })
       });
 
       if (!response.ok) {
-        throw new Error(`Start failed (${response.status})`);
+        throw new Error(`Failed to start workflow (${response.status})`);
       }
 
-      const data = (await response.json()) as StartOffboardingResponse;
-      setStartResult(data);
-      setStatus({ workflowId: data.workflowId, status: data.status });
-      setUiStatus(data.status);
-      setActionStates({
-        'execute:refund': { ...emptyActionState },
-        'execute:data_deletion': { ...emptyActionState }
-      });
-      setPanelAction(null);
-
-      const ledgerResponse = await fetch(`${apiBase}/api/authority/ledger/${data.workflowId}`);
-      if (ledgerResponse.ok) {
-        setLedger((await ledgerResponse.json()) as LedgerEvent[]);
-      }
+      const payload = (await response.json()) as StartOffboardingResponse;
+      setWorkflowId(payload.workflowId);
+      setWorkflowStatus({ workflowId: payload.workflowId, status: payload.status });
+      setClaimsByScope({});
+      setEvents([]);
+      blockRequestedRef.current = { refund: false, deletion: false };
+      setUiState('executing');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setError(err instanceof Error ? err.message : 'Unable to start workflow');
     } finally {
-      setIsLoading(false);
+      setIsStarting(false);
     }
   };
 
-  const refreshStatus = async () => {
+  const triggerRealBlock = async (scope: HighRiskAction) => {
     if (!workflowId) return;
 
-    const response = await fetch(`${apiBase}/api/workflows/${workflowId}/status`);
-    if (response.ok) {
-      setStatus((await response.json()) as WorkflowStatusResponse);
-    }
-
-    const ledgerResponse = await fetch(`${apiBase}/api/authority/ledger/${workflowId}`);
-    if (ledgerResponse.ok) {
-      setLedger((await ledgerResponse.json()) as LedgerEvent[]);
+    try {
+      await fetch(`${apiBase}/api/authority/high-risk/check`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-agent-client-id': 'subagent-d-only'
+        },
+        body: JSON.stringify({
+          workflowId,
+          actionScope: scope
+        })
+      });
+    } catch {
+      // Denied block checks are expected and captured in backend ledger.
     }
   };
 
-  const stepCompletion = useMemo(() => {
-    return progressionSteps.map((step) => ledger.some((event) => event.eventType === step.eventType));
-  }, [ledger]);
-
-  const highestCompletedIndex = stepCompletion.lastIndexOf(true);
-  const firstBlockEvent = useMemo(() => {
-    return ledger.find((event) => event.eventType === 'high_risk_action_blocked' && asRecord(event.payload).actionScope === 'execute:refund');
-  }, [ledger]);
-
-  const secondBlockEvent = useMemo(() => {
-    return ledger.find(
-      (event) => event.eventType === 'high_risk_action_blocked' && asRecord(event.payload).actionScope === 'execute:data_deletion'
-    );
-  }, [ledger]);
-
-  const deletionConsumed = useMemo(() => {
-    return ledger.some(
-      (event) => event.eventType === 'authority_window_consumed' && asRecord(event.payload).actionScope === 'execute:data_deletion'
-    );
-  }, [ledger]);
-
-  const activeAction = useMemo<HighRiskAction | null>(() => {
-    if (deletionConsumed) return null;
-    if (secondBlockEvent) return 'execute:data_deletion';
-    if (firstBlockEvent) return 'execute:refund';
-    return null;
-  }, [deletionConsumed, firstBlockEvent, secondBlockEvent]);
-
-  const requestEscalationAndStepUp = async (action: HighRiskAction) => {
+  const requestTemporaryAuthority = async (scope: HighRiskAction) => {
     if (!workflowId) return;
 
     setError(null);
-    setUiStatus('awaiting-step-up-approval');
-    setPanelAction(action);
-    setIsEscalating(true);
-    setActionStates((prev) => ({
-      ...prev,
-      [action]: {
-        ...prev[action],
-        escalationRecorded: true,
-        awaitingStepUp: true
-      }
-    }));
+    setIsRequestingAuthority(true);
 
     try {
       await fetch(`${apiBase}/api/authority/escalate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workflowId, actionScope: action })
+        headers: {
+          'Content-Type': 'application/json',
+          'x-agent-client-id': 'orchestrator-a'
+        },
+        body: JSON.stringify({
+          workflowId,
+          actionScope: scope,
+          reason: 'Temporary authority requested by operator'
+        })
       });
-
-      const requestBody = {
-        workflowId,
-        customerId,
-        actionScope: action,
-        requestingAgentClientId: 'orchestrator-a',
-        boundAgentClientId: 'subagent-d-only',
-        amount: action === 'execute:refund' ? 82450 : undefined,
-        ttlSeconds: 120
-      };
 
       const requestResponse = await fetch(`${apiBase}/api/authority/window/request`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
+        headers: {
+          'Content-Type': 'application/json',
+          'x-agent-client-id': 'orchestrator-a'
+        },
+        body: JSON.stringify({
+          workflowId,
+          customerId,
+          actionScope: scope,
+          boundAgentClientId: 'subagent-d-only',
+          amount: scope === 'execute:refund' ? 82450 : undefined,
+          ttlSeconds: 120
+        })
       });
 
       if (!requestResponse.ok) {
-        throw new Error(`Step-up request failed (${requestResponse.status})`);
+        throw new Error(`Authority request failed (${requestResponse.status})`);
       }
 
-      const requestData = (await requestResponse.json()) as AuthorityWindowRequestResponse;
-
-      setActionStates((prev) => ({
-        ...prev,
-        [action]: {
-          ...prev[action],
-          requestExpiresAt: requestData.expiresAt
-        }
-      }));
+      const request = (await requestResponse.json()) as AuthorityWindowRequestResponse;
 
       const claimResponse = await fetch(`${apiBase}/api/authority/window/claim`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ windowId: requestData.windowId, claimantAgentClientId: 'subagent-d-only' })
+        headers: {
+          'Content-Type': 'application/json',
+          'x-agent-client-id': 'subagent-d-only'
+        },
+        body: JSON.stringify({
+          windowId: request.windowId
+        })
       });
 
       if (!claimResponse.ok) {
-        throw new Error(`Window claim failed (${claimResponse.status})`);
+        throw new Error(`Authority claim failed (${claimResponse.status})`);
       }
 
-      const claimData = (await claimResponse.json()) as AuthorityWindowClaimResponse;
-
-      setActionStates((prev) => ({
+      const claim = (await claimResponse.json()) as AuthorityWindowClaimResponse;
+      setClaimsByScope((prev) => ({
         ...prev,
-        [action]: {
-          ...prev[action],
-          awaitingStepUp: false,
-          claim: claimData
-        }
+        [scope]: claim
       }));
-      setUiStatus('authority-window-received');
     } catch (err) {
-      setActionStates((prev) => ({
-        ...prev,
-        [action]: {
-          ...prev[action],
-          awaitingStepUp: false
-        }
-      }));
-      setError(err instanceof Error ? err.message : 'Failed to complete step-up flow');
+      setError(err instanceof Error ? err.message : 'Authority request failed');
     } finally {
-      setIsEscalating(false);
+      setIsRequestingAuthority(false);
     }
   };
 
-  const executeHighRiskAction = async (action: HighRiskAction) => {
-    const claim = actionStates[action].claim;
+  const executeAction = async (scope: HighRiskAction) => {
+    const claim = claimsByScope[scope];
     if (!claim) return;
 
     setError(null);
-    setIsExecuting(true);
+    setIsExecutingAction(true);
+
     try {
-      const consumeResponse = await fetch(`${apiBase}/api/authority/window/consume`, {
+      const response = await fetch(`${apiBase}/api/authority/window/consume`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ windowId: claim.windowId, claimantAgentClientId: 'subagent-d-only' })
+        headers: {
+          'Content-Type': 'application/json',
+          'x-agent-client-id': 'subagent-d-only'
+        },
+        body: JSON.stringify({
+          windowId: claim.windowId
+        })
       });
 
-      if (!consumeResponse.ok) {
-        throw new Error(`Execution consume failed (${consumeResponse.status})`);
+      if (!response.ok) {
+        throw new Error(`Execution failed (${response.status})`);
       }
 
-      setActionStates((prev) => ({
-        ...prev,
-        [action]: {
-          ...prev[action],
-          executeComplete: true,
-          claim: null
-        }
-      }));
-      setUiStatus('execution-complete');
+      setClaimsByScope((prev) => {
+        const next = { ...prev };
+        delete next[scope];
+        return next;
+      });
 
-      if (action === 'execute:refund') {
-        await fetch(`${apiBase}/api/authority/high-risk/check`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workflowId, actionScope: 'execute:data_deletion' })
-        });
-      }
-
-      if (action === 'execute:data_deletion') {
-        router.push(`/ledger/${workflowId}`);
+      if (scope === 'execute:refund') {
+        await triggerRealBlock('execute:data_deletion');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to execute action');
+      setError(err instanceof Error ? err.message : 'Execution failed');
     } finally {
-      setIsExecuting(false);
+      setIsExecutingAction(false);
     }
   };
 
-  const activeActionState = activeAction ? actionStates[activeAction] : null;
-  const panelActionState = panelAction ? actionStates[panelAction] : null;
-  const showStepUpPanel = Boolean(panelAction && panelActionState?.escalationRecorded);
-  const hasEscalationLine = actionStates['execute:refund'].escalationRecorded || actionStates['execute:data_deletion'].escalationRecorded;
-  const blockMessage = activeAction === 'execute:data_deletion'
-    ? 'Authority window absent - data deletion blocked'
-    : 'Authority window absent - execution blocked';
+  if (uiState === 'complete') {
+    return (
+      <main className="min-h-screen bg-slate-900 px-6 py-6 text-slate-100">
+        <section className="mx-auto max-w-6xl">
+          <header className="border border-slate-700 bg-slate-800 px-4 py-3">
+            <h1 className="font-sans text-xl font-semibold tracking-wide">AUTHORITY LEDGER (APPEND-ONLY)</h1>
+            <p className="mt-1 font-mono text-xs text-slate-300">workflow_id={workflowId}</p>
+          </header>
+
+          <div className="mt-3 space-y-1 font-mono text-sm">
+            {events.map((event) => (
+              <article key={`${event.workflowId}-${event.seqId}`} className="grid grid-cols-[90px_90px_300px_1fr] border border-slate-700 bg-slate-950 px-3 py-2">
+                <span className="text-slate-300">#{String(event.seqId).padStart(4, '0')}</span>
+                <span className="text-slate-400">{toTime(event.createdAt)}</span>
+                <span className={eventTone(event)}>{event.eventType.toUpperCase()}</span>
+                <span className="text-slate-200">{eventLabel(event)}</span>
+              </article>
+            ))}
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-background px-6 py-10">
-      <div className="mx-auto max-w-4xl space-y-6">
-        <h1 className="text-3xl font-semibold text-primary">Agent Can&apos;t Do That</h1>
-        <p className="text-base text-slate-700">Vertical slice: start offboarding → Temporal workflow trigger → status + ledger event.</p>
-
-        <div className="space-y-3 rounded border border-secondary bg-white p-4">
-          <label className="block text-sm font-medium text-primary" htmlFor="customerId">
-            Customer ID
-          </label>
-          <input
-            id="customerId"
-            className="w-full rounded border border-secondary px-3 py-2"
-            value={customerId}
-            onChange={(event) => setCustomerId(event.target.value)}
-          />
-
-          <div className="flex gap-3">
-            <button
-              className="rounded border border-primary px-4 py-2 text-primary disabled:opacity-50"
-              disabled={isLoading || !customerId}
-              onClick={startWorkflow}
-            >
-              {isLoading ? 'Starting...' : 'Start Offboarding'}
-            </button>
-            <button className="rounded border border-secondary px-4 py-2 text-primary" disabled={!workflowId} onClick={refreshStatus}>
-              Refresh Status
-            </button>
-            <Link className="inline-block rounded border border-primary px-4 py-2 text-primary" href="/demo">
-              Open Demo Screen
-            </Link>
-          </div>
-        </div>
-
-        {error ? <div className="rounded border border-danger bg-red-50 p-3 text-sm text-danger">{error}</div> : null}
-
-        {startResult ? (
-          <div className="rounded border border-secondary bg-white p-4">
-            <h2 className="mb-2 text-lg font-semibold text-primary">Workflow</h2>
-            <p className="text-sm text-slate-700">
-              <strong>ID:</strong> {startResult.workflowId}
-            </p>
-            <p className="text-sm text-slate-700">
-              <strong>Status:</strong> {uiStatus === 'idle' ? status?.status ?? startResult.status : uiStatus}
-            </p>
-
-            <div className="mt-4 space-y-2 rounded border border-secondary_light bg-slate-50 p-3 font-mono text-sm">
-              {progressionSteps.map((step, index) => {
-                if (index > highestCompletedIndex + 1) {
-                  return null;
-                }
-
-                const complete = stepCompletion[index];
-                return (
-                  <p key={step.eventType} className={complete ? 'whitespace-pre text-emerald-700' : 'whitespace-pre text-slate-700'}>
-                    {complete ? step.done : step.pending}
-                  </p>
-                );
-              })}
+    <main className="min-h-screen bg-slate-900 px-6 py-8 text-slate-100">
+      <section className="mx-auto max-w-7xl">
+        {uiState === 'idle' ? (
+          <div className="grid gap-4 border border-slate-700 bg-slate-800 p-6 md:grid-cols-2">
+            <div className="space-y-3">
+              <h1 className="font-sans text-2xl font-semibold">Operations Console</h1>
+              <p className="font-mono text-sm text-slate-300">customer_id: {customerId}</p>
+              <p className="font-mono text-sm text-slate-300">account_type: enterprise</p>
+              <p className="font-mono text-sm text-slate-300">contract_end: 2026-06-30</p>
+              <p className="font-mono text-sm text-slate-300">data_stores: 14</p>
+              <p className="font-mono text-sm text-slate-300">authorized_scope: orchestrate:customer_offboarding</p>
             </div>
 
-            {activeAction ? (
-              <div className="mt-4 bg-slate-900 px-4 py-3 font-mono text-sm text-rose-200">
-                <p>████████████████████████████████</p>
-                <p>AGENT CAN&apos;T DO THAT</p>
-                <p>{blockMessage}</p>
-                <p>████████████████████████████████</p>
-              </div>
-            ) : null}
-
-            {activeAction ? (
+            <div className="space-y-3">
+              <label className="block font-sans text-sm">Customer ID</label>
+              <input
+                className="w-full border border-slate-600 bg-slate-900 px-3 py-2 font-mono text-sm text-slate-100"
+                onChange={(event) => setCustomerId(event.target.value)}
+                value={customerId}
+              />
               <button
-                className="mt-3 text-left text-sm text-slate-700"
-                disabled={isEscalating || Boolean(activeActionState?.executeComplete)}
-                onClick={() => requestEscalationAndStepUp(activeAction)}
+                className="border border-slate-500 bg-slate-700 px-4 py-2 font-sans text-sm disabled:opacity-50"
+                disabled={isStarting || !customerId}
+                onClick={() => {
+                  void startWorkflow();
+                }}
                 type="button"
               >
-                Request temporary execution authority for this agent →
+                {isStarting ? 'INITIATING...' : 'INITIATE OFFBOARDING'}
               </button>
-            ) : null}
-
-            {showStepUpPanel && panelActionState ? (
-              <div className="mt-4 rounded border border-secondary_light bg-slate-50 p-3 text-sm text-slate-800">
-                {panelActionState.awaitingStepUp ? (
-                  <div className="space-y-1">
-                    <p>Action: {panelAction === 'execute:refund' ? 'Cross-border refund execution' : 'Cross-border data deletion execution'}</p>
-                    <p>Customer: {customerId}</p>
-                    <p>Amount: {panelAction === 'execute:refund' ? '$82,450' : 'N/A'}</p>
-                    <p>Required approver: {panelAction === 'execute:refund' ? 'CFO' : 'DPO'}</p>
-                    <p>Status: Step-up dispatched</p>
-                    <p>Authority window expires: {countdownFrom(panelActionState.requestExpiresAt ?? undefined, nowMs)}</p>
-                  </div>
-                ) : null}
-
-                {!panelActionState.awaitingStepUp && panelActionState.claim ? (
-                  <div className="space-y-2">
-                    <p>Authority window received</p>
-                    <p>Scope: {panelActionState.claim.actionScope}</p>
-                    <p>Token TTL: 120 seconds</p>
-                    <p>Bound to: subagent-d only</p>
-                    <p>&quot;This authority cannot be transferred, extended, or reused.&quot;</p>
-                    {!panelActionState.executeComplete ? (
-                      <button
-                        className="rounded border border-primary px-4 py-2 text-primary"
-                        disabled={isExecuting}
-                        onClick={() => {
-                          if (panelAction) {
-                            void executeHighRiskAction(panelAction);
-                          }
-                        }}
-                        type="button"
-                      >
-                        {panelAction === 'execute:refund' ? 'Execute Refund' : 'Execute Deletion'}
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {panelActionState.executeComplete ? <p>Execution complete. Authority consumed.</p> : null}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {ledger.length > 0 ? (
-          <div className="rounded border border-secondary bg-white p-4">
-            <h2 className="mb-3 text-lg font-semibold text-primary">Ledger Events</h2>
-            {hasEscalationLine ? (
-              <p className="mb-2 text-sm text-slate-600">Escalation attempt recorded</p>
-            ) : null}
-            <div className="space-y-2">
-              {ledger.map((event) => (
-                <div key={`${event.workflowId}-${event.seqId}`} className="rounded border border-secondary_light p-3 text-sm">
-                  <p>
-                    <strong>Seq:</strong> {event.seqId} | <strong>Type:</strong> {event.eventType}
-                  </p>
-                  <p>
-                    <strong>At:</strong> {event.createdAt}
-                  </p>
-                </div>
-              ))}
+              {error ? <p className="font-mono text-xs text-red-300">{error}</p> : null}
             </div>
           </div>
         ) : null}
-      </div>
+
+        {uiState === 'executing' ? (
+          <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+            <div className="border border-slate-700 bg-slate-800 p-4">
+              <header className="mb-3 border-b border-slate-700 pb-3">
+                <h2 className="font-sans text-lg font-semibold">Execution Feed</h2>
+                <p className="mt-1 font-mono text-xs text-slate-300">workflow_id: {workflowId}</p>
+                <p className="font-mono text-xs text-slate-400">status: {workflowStatus?.status ?? 'loading'}</p>
+              </header>
+
+              <div className="max-h-[68vh] space-y-1 overflow-y-auto font-mono text-sm">
+                {events.map((event) => (
+                  <div key={`${event.workflowId}-${event.seqId}`} className="grid grid-cols-[34px_70px_1fr] border-b border-slate-700/60 py-1">
+                    <span className={eventTone(event)}>{eventIcon(event)}</span>
+                    <span className="text-slate-400">{toTime(event.createdAt)}</span>
+                    <span className={eventTone(event)}>{eventLabel(event)}</span>
+                  </div>
+                ))}
+                {hasRefundConsumed && hasDeletionBlock ? (
+                  <div className="grid grid-cols-[34px_70px_1fr] border-b border-slate-700/60 py-1">
+                    <span className="text-red-200">[!]</span>
+                    <span className="text-slate-400">{toTime(new Date().toISOString())}</span>
+                    <span className="text-red-200">refund approval does not carry forward</span>
+                  </div>
+                ) : null}
+              </div>
+
+              {error ? <p className="mt-3 font-mono text-xs text-red-300">{error}</p> : null}
+            </div>
+
+            <aside className="border border-slate-700 bg-slate-800 p-4">
+              <h3 className="font-sans text-sm font-semibold uppercase tracking-wide text-slate-200">Step-Up Authority</h3>
+
+              {sidebarScope ? (
+                <div className="mt-3 space-y-2 font-mono text-xs text-slate-300">
+                  <p>action: {sidebarScope}</p>
+                  <p>amount: {sidebarScope === 'execute:refund' ? '$82,450' : 'n/a'}</p>
+                  <p>approver: {sidebarScope === 'execute:refund' ? 'CFO' : 'DPO'}</p>
+                  <p>ttl: {countdown(sidebarClaim?.expiresAt ?? sidebarWindow?.expiresAt, nowMs)}</p>
+                  <p>status: {isAwaitingApproval ? 'Awaiting approval...' : sidebarClaim ? 'Token issued' : 'Blocked'}</p>
+
+                  {!sidebarClaim ? (
+                    <button
+                      className="mt-2 w-full border border-slate-500 bg-slate-700 px-3 py-2 font-sans text-xs disabled:opacity-50"
+                      disabled={isRequestingAuthority || isExecutingAction || (!hasRefundBlock && sidebarScope === 'execute:refund') || (!hasDeletionBlock && sidebarScope === 'execute:data_deletion')}
+                      onClick={() => {
+                        void requestTemporaryAuthority(sidebarScope);
+                      }}
+                      type="button"
+                    >
+                      {isRequestingAuthority ? 'REQUESTING...' : 'REQUEST TEMPORARY AUTHORITY'}
+                    </button>
+                  ) : (
+                    <button
+                      className="mt-2 w-full border border-slate-500 bg-slate-700 px-3 py-2 font-sans text-xs disabled:opacity-50"
+                      disabled={isExecutingAction}
+                      onClick={() => {
+                        void executeAction(sidebarScope);
+                      }}
+                      type="button"
+                    >
+                      {isExecutingAction ? 'EXECUTING...' : sidebarScope === 'execute:refund' ? 'EXECUTE REFUND' : 'EXECUTE DATA DELETION'}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="mt-3 font-mono text-xs text-slate-400">No active high-risk action.</p>
+              )}
+            </aside>
+          </div>
+        ) : null}
+      </section>
     </main>
   );
 }
