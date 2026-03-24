@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
+import { createClient, type RedisClientType } from 'redis';
 import type { LedgerEvent } from '@contracts/index';
 
 type LedgerInsert = {
@@ -19,11 +20,44 @@ type LedgerRow = {
 @Injectable()
 export class LedgerRepository {
   private readonly pool: Pool;
+  private readonly redisUrl: string;
+  private redis: RedisClientType | null = null;
+  private redisConnectAttempted = false;
+  private readonly ledgerCacheTtlSeconds = 30;
 
   constructor() {
     const connectionString = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/acdt';
+    this.redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 
     this.pool = new Pool({ connectionString });
+  }
+
+  private async getRedisClient(): Promise<RedisClientType | null> {
+    if (this.redisConnectAttempted && !this.redis?.isOpen) {
+      return null;
+    }
+
+    if (!this.redis) {
+      this.redis = createClient({ url: this.redisUrl });
+      this.redis.on('error', () => {
+        // Degrade gracefully to Postgres-only behavior when Redis is unavailable.
+      });
+    }
+
+    if (!this.redis.isOpen) {
+      this.redisConnectAttempted = true;
+      try {
+        await this.redis.connect();
+      } catch {
+        return null;
+      }
+    }
+
+    return this.redis;
+  }
+
+  private ledgerCacheKey(workflowId: string): string {
+    return `acdt:ledger:${workflowId}`;
   }
 
   async ensureSchema(): Promise<void> {
@@ -94,10 +128,32 @@ export class LedgerRepository {
       [input.workflowId, input.eventType, JSON.stringify(input.payload)]
     );
 
+    const redis = await this.getRedisClient();
+    if (redis) {
+      await redis.del(this.ledgerCacheKey(input.workflowId)).catch(() => undefined);
+    }
+
     return this.mapRowToEvent(result.rows[0]);
   }
 
   async listByWorkflowId(workflowId: string): Promise<LedgerEvent[]> {
+    const redis = await this.getRedisClient();
+    const cacheKey = this.ledgerCacheKey(workflowId);
+
+    if (redis) {
+      const cached = await redis.get(cacheKey).catch(() => null);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as LedgerEvent[];
+          if (Array.isArray(parsed)) {
+            return parsed;
+          }
+        } catch {
+          // Ignore malformed cache entries and read from Postgres.
+        }
+      }
+    }
+
     const result = await this.pool.query<LedgerRow>(
       `
         SELECT seq_id, workflow_id, event_type, event_payload, created_at
@@ -108,7 +164,15 @@ export class LedgerRepository {
       [workflowId]
     );
 
-    return result.rows.map((row) => this.mapRowToEvent(row));
+    const events = result.rows.map((row) => this.mapRowToEvent(row));
+
+    if (redis) {
+      await redis
+        .setEx(cacheKey, this.ledgerCacheTtlSeconds, JSON.stringify(events))
+        .catch(() => undefined);
+    }
+
+    return events;
   }
 
   private mapRowToEvent(row: LedgerRow): LedgerEvent {
