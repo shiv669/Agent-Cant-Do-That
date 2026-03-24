@@ -13,6 +13,7 @@ import type {
   HighRiskAuthorityCheckInput
 } from '@contracts/index';
 import { Auth0AuthorityService } from './auth0-authority.service';
+import { AgentRuntimeService } from './agent-runtime.service';
 import { AuthorityWindowRepository } from './authority-window.repository';
 import { LedgerRepository } from './ledger.repository';
 
@@ -20,6 +21,7 @@ import { LedgerRepository } from './ledger.repository';
 export class AuthorityService implements OnModuleInit {
   constructor(
     private readonly auth0AuthorityService: Auth0AuthorityService,
+    private readonly agentRuntimeService: AgentRuntimeService,
     private readonly authorityWindowRepository: AuthorityWindowRepository,
     private readonly ledgerRepository: LedgerRepository
   ) {}
@@ -359,6 +361,24 @@ export class AuthorityService implements OnModuleInit {
       });
     }
 
+    if (consumed.action_scope === 'execute:refund') {
+      const metadata = await this.agentRuntimeService.planAction({
+        workflowId: consumed.workflow_id,
+        customerId: this.extractCustomerIdFromWorkflowId(consumed.workflow_id),
+        action: 'execute_data_deletion'
+      });
+
+      await this.checkHighRiskAction({
+        workflowId: consumed.workflow_id,
+        actionScope: 'execute:data_deletion',
+        actionReason: metadata.actionReason,
+        reasoning: metadata.reasoning,
+        decisionSource: metadata.decisionSource,
+        modelProvider: metadata.modelProvider,
+        modelName: metadata.modelName
+      }).catch(() => undefined);
+    }
+
     return {
       windowId: revoked.window_id,
       workflowId: revoked.workflow_id,
@@ -427,7 +447,13 @@ export class AuthorityService implements OnModuleInit {
           actionScope: input.actionScope,
           reason: 'Authority window absent - execution blocked',
           upstreamReason: decision.reason,
-          upstreamStatus: decision.upstreamStatus
+          upstreamStatus: decision.upstreamStatus,
+          actionReason: input.actionReason,
+          reasoning: input.reasoning,
+          decisionSource: input.decisionSource,
+          modelProvider: input.modelProvider,
+          modelName: input.modelName,
+          actor: 'autonomous_agent'
         }
       });
 
@@ -498,5 +524,20 @@ export class AuthorityService implements OnModuleInit {
 
     const bindingMessage = `cid:${input.customerId} act:${actionPart} ${valuePart} req:${requester}`;
     return bindingMessage.length > 64 ? bindingMessage.slice(0, 64) : bindingMessage;
+  }
+
+  private extractCustomerIdFromWorkflowId(workflowId: string): string {
+    const prefix = 'offboarding-';
+    if (!workflowId.startsWith(prefix)) {
+      return workflowId;
+    }
+
+    const body = workflowId.slice(prefix.length);
+    const marker = body.lastIndexOf('-');
+    if (marker <= 0) {
+      return body;
+    }
+
+    return body.slice(0, marker);
   }
 }

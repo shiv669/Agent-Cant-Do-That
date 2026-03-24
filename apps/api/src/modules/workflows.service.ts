@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Client, Connection } from '@temporalio/client';
 import { Auth0AuthorityService } from './auth0-authority.service';
+import { AuthorityService } from './authority.service';
+import { AgentRuntimeService } from './agent-runtime.service';
 import { LedgerRepository } from './ledger.repository';
 import type {
   LedgerEvent,
@@ -14,7 +16,9 @@ import type { OnModuleInit } from '@nestjs/common';
 export class WorkflowsService implements OnModuleInit {
   constructor(
     private readonly ledgerRepository: LedgerRepository,
-    private readonly auth0AuthorityService: Auth0AuthorityService
+    private readonly auth0AuthorityService: Auth0AuthorityService,
+    private readonly authorityService: AuthorityService,
+    private readonly agentRuntimeService: AgentRuntimeService
   ) {}
 
   private async sleep(ms: number): Promise<void> {
@@ -39,6 +43,68 @@ export class WorkflowsService implements OnModuleInit {
       eventType,
       payload
     });
+  }
+
+  private async agentMetadata(input: {
+    workflowId: string;
+    customerId: string;
+    action:
+      | 'revoke_access'
+      | 'export_billing_history'
+      | 'cancel_subscriptions'
+      | 'validate_customer_state'
+      | 'enumerate_data_stores'
+      | 'run_compliance_check'
+      | 'execute_refund'
+      | 'execute_data_deletion';
+    amountUsd?: number;
+  }): Promise<Record<string, unknown>> {
+    const decision = await this.agentRuntimeService.planAction({
+      workflowId: input.workflowId,
+      customerId: input.customerId,
+      action: input.action,
+      amountUsd: input.amountUsd
+    });
+
+    return {
+      actor: 'autonomous_agent',
+      agentId: 'orchestrator-agent-v1',
+      actionName: decision.action,
+      actionReason: decision.actionReason,
+      reasoning: decision.reasoning,
+      decisionSource: decision.decisionSource,
+      modelProvider: decision.modelProvider,
+      modelName: decision.modelName
+    };
+  }
+
+  private async attemptHighRiskAction(input: {
+    workflowId: string;
+    customerId: string;
+    actionScope: 'execute:refund' | 'execute:data_deletion';
+    amountUsd?: number;
+  }): Promise<void> {
+    const action = input.actionScope === 'execute:refund' ? 'execute_refund' : 'execute_data_deletion';
+    const metadata = await this.agentMetadata({
+      workflowId: input.workflowId,
+      customerId: input.customerId,
+      action,
+      amountUsd: input.amountUsd
+    });
+
+    try {
+      await this.authorityService.checkHighRiskAction({
+        workflowId: input.workflowId,
+        actionScope: input.actionScope,
+        actionReason: metadata.actionReason as string,
+        reasoning: metadata.reasoning as string,
+        decisionSource: metadata.decisionSource as string,
+        modelProvider: metadata.modelProvider as string,
+        modelName: metadata.modelName as string
+      });
+    } catch {
+      // Blocked attempts are expected and recorded in the append-only ledger.
+    }
   }
 
   private async resolveOpsSubjectToken(opsSubjectToken?: string): Promise<string> {
@@ -208,6 +274,7 @@ export class WorkflowsService implements OnModuleInit {
   async startOffboarding(input: StartOffboardingInput): Promise<StartOffboardingResponse> {
     const workflowId = `offboarding-${input.customerId}-${Date.now()}`;
     const opsSubjectToken = (input as StartOffboardingInput & { opsSubjectToken?: string }).opsSubjectToken;
+    const refundAmountUsd = 82450;
 
     const client = await this.getTemporalClient();
 
@@ -218,13 +285,24 @@ export class WorkflowsService implements OnModuleInit {
     });
 
     await this.sleep(500);
+    const revokeMetadata = await this.agentMetadata({
+      workflowId,
+      customerId: input.customerId,
+      action: 'revoke_access'
+    });
     await this.appendEvent(workflowId, 'revoke_sso_access_completed', {
-      provider: 'enterprise_sso'
+      provider: 'enterprise_sso',
+      ...revokeMetadata
     });
 
     await this.sleep(500);
     const requireTokenVaultExport = process.env.TOKEN_VAULT_BILLING_EXPORT_REQUIRED === 'true';
     let billingExportPayload: Record<string, unknown>;
+    const billingMetadata = await this.agentMetadata({
+      workflowId,
+      customerId: input.customerId,
+      action: 'export_billing_history'
+    });
     try {
       billingExportPayload = await this.exportBillingHistoryViaTokenVault({
         customerId: input.customerId,
@@ -245,29 +323,62 @@ export class WorkflowsService implements OnModuleInit {
     }
 
     await this.appendEvent(workflowId, 'billing_history_exported', {
-      ...billingExportPayload
+      ...billingExportPayload,
+      ...billingMetadata
     });
 
     await this.sleep(500);
+    const subscriptionMetadata = await this.agentMetadata({
+      workflowId,
+      customerId: input.customerId,
+      action: 'cancel_subscriptions'
+    });
     await this.appendEvent(workflowId, 'subscriptions_cancelled', {
-      cancelledCount: 3
+      cancelledCount: 3,
+      ...subscriptionMetadata
     });
 
     await this.sleep(1500);
+    const validationMetadata = await this.agentMetadata({
+      workflowId,
+      customerId: input.customerId,
+      action: 'validate_customer_state'
+    });
     await this.appendEvent(workflowId, 'customer_validation_passed', {
       customerId: input.customerId,
-      status: 'active'
+      status: 'active',
+      ...validationMetadata
     });
 
     await this.sleep(2000);
+    const enumerateMetadata = await this.agentMetadata({
+      workflowId,
+      customerId: input.customerId,
+      action: 'enumerate_data_stores'
+    });
     await this.appendEvent(workflowId, 'data_stores_enumerated', {
-      storeCount: 14
+      storeCount: 14,
+      ...enumerateMetadata
     });
 
     await this.sleep(1000);
+    const complianceMetadata = await this.agentMetadata({
+      workflowId,
+      customerId: input.customerId,
+      action: 'run_compliance_check'
+    });
     await this.appendEvent(workflowId, 'compliance_check_passed', {
       legalHolds: 0,
-      offboardingPermitted: true
+      offboardingPermitted: true,
+      ...complianceMetadata
+    });
+
+    await this.sleep(500);
+    await this.attemptHighRiskAction({
+      workflowId,
+      customerId: input.customerId,
+      actionScope: 'execute:refund',
+      amountUsd: refundAmountUsd
     });
 
     return {

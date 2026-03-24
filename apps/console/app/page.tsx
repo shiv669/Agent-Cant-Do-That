@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   AuthorityWindowClaimResponse,
   AuthorityWindowRequestResponse,
@@ -46,21 +46,42 @@ function countdown(expiresAt?: string, nowMs?: number): string {
 
 function eventLabel(event: LedgerEvent): string {
   const payload = asRecord(event.payload);
+  const actionReason = typeof payload.actionReason === 'string' ? payload.actionReason : '';
+  const reasoning = typeof payload.reasoning === 'string' ? payload.reasoning : '';
+
+  const withReason = (base: string): string => {
+    if (!actionReason && !reasoning) return base;
+    if (actionReason && reasoning) return `${base} | reason=${actionReason} | rationale=${reasoning}`;
+    return `${base} | reason=${actionReason || reasoning}`;
+  };
+
   if (event.eventType === 'high_risk_action_blocked') {
     const scope = String(payload.actionScope ?? '');
     if (scope === 'execute:refund') {
-      return 'execution blocked: missing scope execute:refund';
+      return withReason('system.response 403 forbidden missing_scope=execute:refund');
     }
     if (scope === 'execute:data_deletion') {
-      return 'execution blocked: missing scope execute:data_deletion';
+      return withReason('system.response 403 forbidden missing_scope=execute:data_deletion');
     }
+  }
+
+  if (event.eventType === 'authority_window_consumed') {
+    const scope = String(payload.actionScope ?? '');
+    if (scope === 'execute:refund') return 'agent.execute(refund) system.result success';
+    if (scope === 'execute:data_deletion') return 'agent.execute(data_deletion) system.result success';
+  }
+
+  if (event.eventType === 'billing_history_exported') {
+    const tokenSource = typeof payload.tokenSource === 'string' ? payload.tokenSource : 'none';
+    const exportFormat = typeof payload.exportFormat === 'string' ? payload.exportFormat : 'unknown';
+    return withReason(`billing export=${exportFormat} token_source=${tokenSource}`);
   }
 
   if (event.eventType === 'unauthorized_escalation_attempt_recorded') {
     return 'ESCALATION_ATTEMPT_RECORDED';
   }
 
-  return event.eventType.toUpperCase();
+  return withReason(event.eventType.toUpperCase());
 }
 
 function eventTone(event: LedgerEvent): string {
@@ -111,8 +132,6 @@ export default function HomePage() {
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [claimsByScope, setClaimsByScope] = useState<ClaimByScope>({});
   const [nowMs, setNowMs] = useState(Date.now());
-
-  const blockRequestedRef = useRef<{ refund: boolean; deletion: boolean }>({ refund: false, deletion: false });
 
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
@@ -258,23 +277,6 @@ export default function HomePage() {
   }, [events, sidebarScope]);
 
   useEffect(() => {
-    if (!workflowId) return;
-
-    const lowRiskDone = events.some((event) => event.eventType === 'compliance_check_passed');
-    if (!lowRiskDone) return;
-
-    if (!blockRequestedRef.current.refund && !hasRefundBlock) {
-      blockRequestedRef.current.refund = true;
-      void triggerRealBlock('execute:refund');
-    }
-
-    if (hasRefundConsumed && !blockRequestedRef.current.deletion && !hasDeletionBlock) {
-      blockRequestedRef.current.deletion = true;
-      void triggerRealBlock('execute:data_deletion');
-    }
-  }, [events, hasDeletionBlock, hasRefundBlock, hasRefundConsumed, workflowId]);
-
-  useEffect(() => {
     if (hasDeletionConsumed) {
       setUiState('complete');
     }
@@ -303,32 +305,11 @@ export default function HomePage() {
       setWorkflowStatus({ workflowId: payload.workflowId, status: payload.status });
       setClaimsByScope({});
       setEvents([]);
-      blockRequestedRef.current = { refund: false, deletion: false };
       setUiState('executing');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to start workflow');
     } finally {
       setIsStarting(false);
-    }
-  };
-
-  const triggerRealBlock = async (scope: HighRiskAction) => {
-    if (!workflowId) return;
-
-    try {
-      await fetch(`${apiBase}/api/authority/high-risk/check`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-agent-client-id': 'subagent-d-only'
-        },
-        body: JSON.stringify({
-          workflowId,
-          actionScope: scope
-        })
-      });
-    } catch {
-      // Denied block checks are expected and captured in backend ledger.
     }
   };
 
@@ -429,10 +410,6 @@ export default function HomePage() {
         delete next[scope];
         return next;
       });
-
-      if (scope === 'execute:refund') {
-        await triggerRealBlock('execute:data_deletion');
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Execution failed');
     } finally {

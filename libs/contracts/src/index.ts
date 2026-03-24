@@ -59,6 +59,11 @@ export interface HighRiskAuthorityCheckInput {
   workflowId: string;
   actionScope: Extract<ActionScope, 'execute:refund' | 'execute:data_deletion'>;
   authorityWindowToken?: string;
+  actionReason?: string;
+  reasoning?: string;
+  decisionSource?: string;
+  modelProvider?: string;
+  modelName?: string;
 }
 
 export interface EscalationAttemptInput extends HighRiskAuthorityCheckInput {
