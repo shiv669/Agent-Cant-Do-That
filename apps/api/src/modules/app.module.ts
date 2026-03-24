@@ -8,6 +8,7 @@ import { HealthController } from './health.controller';
 import { WorkflowsController } from './workflows.controller';
 import { WorkflowsService } from './workflows.service';
 import { LedgerRepository } from './ledger.repository';
+import { EvidenceSheetService } from './evidence-sheet.service';
 
 @Module({
   imports: [],
@@ -18,7 +19,8 @@ import { LedgerRepository } from './ledger.repository';
     AuthorityService,
     Auth0AuthorityService,
     AuthorityWindowRepository,
-    AgentRuntimeService
+    AgentRuntimeService,
+    EvidenceSheetService
   ]
 })
 export class AppModule {}

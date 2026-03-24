@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import { createClient, type RedisClientType } from 'redis';
+import { Observable, Subject } from 'rxjs';
+import { filter } from 'rxjs/operators';
 import type { LedgerEvent } from '@contracts/index';
+import { EvidenceSheetService } from './evidence-sheet.service';
 
 type LedgerInsert = {
   workflowId: string;
@@ -24,8 +27,9 @@ export class LedgerRepository {
   private redis: RedisClientType | null = null;
   private redisConnectAttempted = false;
   private readonly ledgerCacheTtlSeconds = 30;
+  private readonly eventSubject = new Subject<LedgerEvent>();
 
-  constructor() {
+  constructor(private readonly evidenceSheetService: EvidenceSheetService) {
     const connectionString = process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/acdt';
     this.redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
 
@@ -128,12 +132,16 @@ export class LedgerRepository {
       [input.workflowId, input.eventType, JSON.stringify(input.payload)]
     );
 
+    const event = this.mapRowToEvent(result.rows[0]);
+
     const redis = await this.getRedisClient();
     if (redis) {
       await redis.del(this.ledgerCacheKey(input.workflowId)).catch(() => undefined);
     }
 
-    return this.mapRowToEvent(result.rows[0]);
+    void this.evidenceSheetService.appendLedgerEvent(event);
+    this.eventSubject.next(event);
+    return event;
   }
 
   async listByWorkflowId(workflowId: string): Promise<LedgerEvent[]> {
@@ -173,6 +181,24 @@ export class LedgerRepository {
     }
 
     return events;
+  }
+
+  async listByWorkflowIdSince(workflowId: string, sinceSeqId: number): Promise<LedgerEvent[]> {
+    const result = await this.pool.query<LedgerRow>(
+      `
+        SELECT seq_id, workflow_id, event_type, event_payload, created_at
+        FROM authority_ledger_events
+        WHERE workflow_id = $1 AND seq_id > $2
+        ORDER BY seq_id ASC;
+      `,
+      [workflowId, sinceSeqId]
+    );
+
+    return result.rows.map((row) => this.mapRowToEvent(row));
+  }
+
+  observeWorkflowEvents(workflowId: string): Observable<LedgerEvent> {
+    return this.eventSubject.pipe(filter((event) => event.workflowId === workflowId));
   }
 
   private mapRowToEvent(row: LedgerRow): LedgerEvent {

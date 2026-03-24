@@ -36,6 +36,7 @@ export type WorkflowStatus =
 
 export interface StartOffboardingInput {
   customerId: string;
+  refundAmountUsd: number;
 }
 
 export interface WorkflowStatusResponse {
@@ -86,6 +87,8 @@ export interface AuthorityWindowRequestInput {
   boundAgentClientId: string;
   amount?: number;
   ttlSeconds?: number;
+  actionReason?: string;
+  reasoning?: string;
 }
 
 export interface AuthorityWindowRequestResponse {
@@ -115,6 +118,8 @@ export interface AuthorityWindowClaimResponse {
 export interface AuthorityWindowConsumeInput {
   windowId: string;
   claimantAgentClientId: string;
+  actionReason?: string;
+  reasoning?: string;
 }
 
 export interface AuthorityWindowConsumeResponse {

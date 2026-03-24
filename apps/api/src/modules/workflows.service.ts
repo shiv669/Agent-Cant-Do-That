@@ -1,9 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Client, Connection } from '@temporalio/client';
 import { Auth0AuthorityService } from './auth0-authority.service';
 import { AuthorityService } from './authority.service';
 import { AgentRuntimeService } from './agent-runtime.service';
 import { LedgerRepository } from './ledger.repository';
+import { EvidenceSheetService } from './evidence-sheet.service';
 import type {
   LedgerEvent,
   StartOffboardingInput,
@@ -18,7 +19,8 @@ export class WorkflowsService implements OnModuleInit {
     private readonly ledgerRepository: LedgerRepository,
     private readonly auth0AuthorityService: Auth0AuthorityService,
     private readonly authorityService: AuthorityService,
-    private readonly agentRuntimeService: AgentRuntimeService
+    private readonly agentRuntimeService: AgentRuntimeService,
+    private readonly evidenceSheetService: EvidenceSheetService
   ) {}
 
   private async sleep(ms: number): Promise<void> {
@@ -161,7 +163,13 @@ export class WorkflowsService implements OnModuleInit {
     throw new Error('Unable to resolve Ops subject token (no OPS_USER_ID and password-realm fallback failed)');
   }
 
-  private async createGoogleSheet(input: { accessToken: string; customerId: string; workflowId: string }): Promise<string> {
+  private async createGoogleSheet(input: {
+    accessToken: string;
+    customerId: string;
+    workflowId: string;
+    refundAmountUsd: number;
+    initialLedgerEvents: LedgerEvent[];
+  }): Promise<{ spreadsheetId: string; sheetUrl: string; publicSheetUrl: string; isPublic: boolean; evidenceEntries: Array<{ key: string; value: string }> }> {
     const createResponse = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
       method: 'POST',
       headers: {
@@ -172,7 +180,7 @@ export class WorkflowsService implements OnModuleInit {
         properties: {
           title: `Billing Export ${input.customerId} ${new Date().toISOString().slice(0, 10)}`
         },
-        sheets: [{ properties: { title: 'BillingHistory' } }]
+        sheets: [{ properties: { title: 'BillingHistory' } }, { properties: { title: 'LiveFeed' } }, { properties: { title: 'Summary' } }]
       })
     });
 
@@ -192,22 +200,60 @@ export class WorkflowsService implements OnModuleInit {
       throw new Error('Google Sheets response missing spreadsheet URL');
     }
 
-    const now = new Date().toISOString();
-    const rows = [
-      ['invoice_id', 'customer_id', 'period', 'amount_usd', 'status', 'exported_at'],
-      ['inv-1001', input.customerId, '2026-01', '199.00', 'paid', now],
-      ['inv-1002', input.customerId, '2026-02', '199.00', 'paid', now],
-      ['inv-1003', input.customerId, '2026-03', '199.00', 'due', now],
-      ['workflow_id', input.workflowId, '', '', '', now]
-    ];
-
     if (!createPayload.spreadsheetId) {
       throw new Error('Google Sheets response missing spreadsheetId for data write');
     }
 
+    const spreadsheetId = createPayload.spreadsheetId;
+    const publicSheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit?usp=sharing`;
+
+    const now = new Date().toISOString();
+    const billingRows = [
+      ['record_type', 'workflow_id', 'seq_id', 'event_type', 'action_scope', 'action_reason', 'reasoning', 'created_at'],
+      ...input.initialLedgerEvents.map((event) => {
+        const payload = (event.payload ?? {}) as Record<string, unknown>;
+        return [
+          'ledger_event',
+          event.workflowId,
+          String(event.seqId),
+          event.eventType,
+          typeof payload.actionScope === 'string' ? payload.actionScope : '',
+          typeof payload.actionReason === 'string' ? payload.actionReason : '',
+          typeof payload.reasoning === 'string' ? payload.reasoning : '',
+          event.createdAt
+        ];
+      }),
+      [
+        'refund_plan',
+        input.workflowId,
+        '',
+        'execute:refund',
+        'execute:refund',
+        'Configured refund amount for this workflow',
+        '',
+        `${input.refundAmountUsd.toFixed(2)} USD`
+      ]
+    ];
+
+    const evidenceEntries = [
+      { key: 'workflow_id', value: input.workflowId },
+      { key: 'customer_id', value: input.customerId },
+      { key: 'token_source', value: 'Auth0 Token Vault' },
+      { key: 'token_exchange_mode', value: 'runtime exchange (no stored provider tokens)' },
+      { key: 'connection', value: process.env.AUTH0_CONNECTION_NAME ?? 'google-oauth2' },
+      { key: 'refund_amount_usd', value: input.refundAmountUsd.toFixed(2) },
+      { key: 'exported_at', value: now },
+      { key: 'public_sheet_url', value: publicSheetUrl }
+    ];
+
+    const summaryRows = [
+      ['evidence_key', 'evidence_value'],
+      ...evidenceEntries.map((entry) => [entry.key, entry.value])
+    ];
+
     const valuesResponse = await fetch(
       'https://sheets.googleapis.com/v4/spreadsheets/' +
-        encodeURIComponent(createPayload.spreadsheetId) +
+        encodeURIComponent(spreadsheetId) +
         '/values/BillingHistory!A1:append?valueInputOption=RAW',
       {
         method: 'POST',
@@ -215,7 +261,7 @@ export class WorkflowsService implements OnModuleInit {
           Authorization: `Bearer ${input.accessToken}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ values: rows })
+        body: JSON.stringify({ values: billingRows })
       }
     );
 
@@ -224,13 +270,55 @@ export class WorkflowsService implements OnModuleInit {
       throw new Error(`Google Sheets write failed (${valuesResponse.status}): ${text}`);
     }
 
-    return spreadsheetUrl;
+    const summaryResponse = await fetch(
+      'https://sheets.googleapis.com/v4/spreadsheets/' +
+        encodeURIComponent(spreadsheetId) +
+        '/values/Summary!A1:append?valueInputOption=RAW',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${input.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ values: summaryRows })
+      }
+    );
+
+    if (!summaryResponse.ok) {
+      const text = await summaryResponse.text();
+      throw new Error(`Google Sheets summary write failed (${summaryResponse.status}): ${text}`);
+    }
+
+    let isPublic = false;
+    const permissionResponse = await fetch(
+      'https://www.googleapis.com/drive/v3/files/' +
+        encodeURIComponent(spreadsheetId) +
+        '/permissions?supportsAllDrives=true&sendNotificationEmail=false',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${input.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          role: 'reader',
+          type: 'anyone'
+        })
+      }
+    );
+
+    if (permissionResponse.ok) {
+      isPublic = true;
+    }
+
+    return { spreadsheetId, sheetUrl: spreadsheetUrl, publicSheetUrl, isPublic, evidenceEntries };
   }
 
   private async exportBillingHistoryViaTokenVault(input: {
     customerId: string;
     workflowId: string;
     opsSubjectToken?: string;
+    refundAmountUsd: number;
   }): Promise<Record<string, unknown>> {
     const resolvedOpsSubjectToken = await this.resolveOpsSubjectToken(input.opsSubjectToken);
 
@@ -240,11 +328,24 @@ export class WorkflowsService implements OnModuleInit {
       loginHint: process.env.OPS_TOKEN_VAULT_LOGIN_HINT
     });
 
-    const sheetUrl = await this.createGoogleSheet({
+    const preExportEvents = await this.ledgerRepository.listByWorkflowId(input.workflowId);
+
+    const sheet = await this.createGoogleSheet({
       accessToken: providerToken.accessToken,
       customerId: input.customerId,
-      workflowId: input.workflowId
+      workflowId: input.workflowId,
+      refundAmountUsd: input.refundAmountUsd,
+      initialLedgerEvents: preExportEvents
     });
+
+    await this.evidenceSheetService.registerWorkflowSheet({
+      workflowId: input.workflowId,
+      spreadsheetId: sheet.spreadsheetId,
+      accessToken: providerToken.accessToken
+    });
+
+    const existingEvents = await this.ledgerRepository.listByWorkflowId(input.workflowId);
+    await this.evidenceSheetService.seedWorkflowEvents(input.workflowId, existingEvents);
 
     const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
       method: 'GET',
@@ -262,7 +363,10 @@ export class WorkflowsService implements OnModuleInit {
 
     return {
       exportFormat: 'google_sheets',
-      sheetUrl,
+      sheetUrl: sheet.sheetUrl,
+      publicSheetUrl: sheet.publicSheetUrl,
+      isPublic: sheet.isPublic,
+      evidenceEntries: sheet.evidenceEntries,
       tokenSource: 'Auth0 Token Vault',
       connection: process.env.AUTH0_CONNECTION_NAME ?? 'google-oauth2',
       opsUserId: process.env.OPS_USER_ID ?? 'unknown',
@@ -271,48 +375,47 @@ export class WorkflowsService implements OnModuleInit {
     };
   }
 
-  async startOffboarding(input: StartOffboardingInput): Promise<StartOffboardingResponse> {
-    const workflowId = `offboarding-${input.customerId}-${Date.now()}`;
-    const opsSubjectToken = (input as StartOffboardingInput & { opsSubjectToken?: string }).opsSubjectToken;
-    const refundAmountUsd = 82450;
-
-    const client = await this.getTemporalClient();
-
-    await client.workflow.start('customerOffboardingWorkflow', {
-      taskQueue: 'acdt-task-queue',
-      workflowId,
-      args: [input]
-    });
+  private async executeOffboardingInBackground(input: {
+    workflowId: string;
+    customerId: string;
+    opsSubjectToken?: string;
+    refundAmountUsd: number;
+  }): Promise<void> {
+    const requireTokenVaultExport = process.env.TOKEN_VAULT_BILLING_EXPORT_REQUIRED === 'true';
 
     await this.sleep(500);
     const revokeMetadata = await this.agentMetadata({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       action: 'revoke_access'
     });
-    await this.appendEvent(workflowId, 'revoke_sso_access_completed', {
+    await this.appendEvent(input.workflowId, 'revoke_sso_access_completed', {
       provider: 'enterprise_sso',
       ...revokeMetadata
     });
 
     await this.sleep(500);
-    const requireTokenVaultExport = process.env.TOKEN_VAULT_BILLING_EXPORT_REQUIRED === 'true';
     let billingExportPayload: Record<string, unknown>;
     const billingMetadata = await this.agentMetadata({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       action: 'export_billing_history'
     });
     try {
       billingExportPayload = await this.exportBillingHistoryViaTokenVault({
         customerId: input.customerId,
-        workflowId,
-        opsSubjectToken
+        workflowId: input.workflowId,
+        opsSubjectToken: input.opsSubjectToken,
+        refundAmountUsd: input.refundAmountUsd
       });
     } catch (error) {
       if (requireTokenVaultExport) {
         const reason = error instanceof Error ? error.message : 'Token Vault billing export failed';
-        throw new Error(reason);
+        await this.appendEvent(input.workflowId, 'authorization_blocked', {
+          reason,
+          stage: 'billing_history_exported'
+        });
+        return;
       }
 
       billingExportPayload = {
@@ -322,29 +425,29 @@ export class WorkflowsService implements OnModuleInit {
       };
     }
 
-    await this.appendEvent(workflowId, 'billing_history_exported', {
+    await this.appendEvent(input.workflowId, 'billing_history_exported', {
       ...billingExportPayload,
       ...billingMetadata
     });
 
     await this.sleep(500);
     const subscriptionMetadata = await this.agentMetadata({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       action: 'cancel_subscriptions'
     });
-    await this.appendEvent(workflowId, 'subscriptions_cancelled', {
+    await this.appendEvent(input.workflowId, 'subscriptions_cancelled', {
       cancelledCount: 3,
       ...subscriptionMetadata
     });
 
     await this.sleep(1500);
     const validationMetadata = await this.agentMetadata({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       action: 'validate_customer_state'
     });
-    await this.appendEvent(workflowId, 'customer_validation_passed', {
+    await this.appendEvent(input.workflowId, 'customer_validation_passed', {
       customerId: input.customerId,
       status: 'active',
       ...validationMetadata
@@ -352,22 +455,22 @@ export class WorkflowsService implements OnModuleInit {
 
     await this.sleep(2000);
     const enumerateMetadata = await this.agentMetadata({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       action: 'enumerate_data_stores'
     });
-    await this.appendEvent(workflowId, 'data_stores_enumerated', {
+    await this.appendEvent(input.workflowId, 'data_stores_enumerated', {
       storeCount: 14,
       ...enumerateMetadata
     });
 
     await this.sleep(1000);
     const complianceMetadata = await this.agentMetadata({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       action: 'run_compliance_check'
     });
-    await this.appendEvent(workflowId, 'compliance_check_passed', {
+    await this.appendEvent(input.workflowId, 'compliance_check_passed', {
       legalHolds: 0,
       offboardingPermitted: true,
       ...complianceMetadata
@@ -375,23 +478,82 @@ export class WorkflowsService implements OnModuleInit {
 
     await this.sleep(500);
     await this.attemptHighRiskAction({
-      workflowId,
+      workflowId: input.workflowId,
       customerId: input.customerId,
       actionScope: 'execute:refund',
-      amountUsd: refundAmountUsd
+      amountUsd: input.refundAmountUsd
+    });
+  }
+
+  async startOffboarding(input: StartOffboardingInput): Promise<StartOffboardingResponse> {
+    const workflowId = `offboarding-${input.customerId}-${Date.now()}`;
+    const opsSubjectToken = (input as StartOffboardingInput & { opsSubjectToken?: string }).opsSubjectToken;
+    const parsedRefund = Number(input.refundAmountUsd);
+    if (!Number.isFinite(parsedRefund) || parsedRefund <= 0) {
+      throw new BadRequestException('refundAmountUsd must be a positive number');
+    }
+    const refundAmountUsd = parsedRefund;
+
+    const client = await this.getTemporalClient();
+
+    await client.workflow.start('customerOffboardingWorkflow', {
+      taskQueue: 'acdt-task-queue',
+      workflowId,
+      args: [input]
+    });
+
+    void this.executeOffboardingInBackground({
+      workflowId,
+      customerId: input.customerId,
+      opsSubjectToken,
+      refundAmountUsd
+    }).catch(async (error: unknown) => {
+      await this.appendEvent(workflowId, 'authorization_blocked', {
+        reason: error instanceof Error ? error.message : 'Offboarding execution failed',
+        stage: 'background_execution'
+      });
     });
 
     return {
       workflowId,
       customerId: input.customerId,
-      status: 'blocked-awaiting-authority'
+      status: 'running'
     };
   }
 
   async getStatus(workflowId: string): Promise<WorkflowStatusResponse> {
+    const events = await this.ledgerRepository.listByWorkflowId(workflowId);
+
+    const hasFailure = events.some((event) => event.eventType === 'authorization_blocked');
+    if (hasFailure) {
+      return {
+        workflowId,
+        status: 'failed'
+      };
+    }
+
+    const hasDeletionConsumed = events.some((event) => {
+      if (event.eventType !== 'authority_window_consumed') return false;
+      const payload = event.payload as Record<string, unknown>;
+      return payload.actionScope === 'execute:data_deletion';
+    });
+
+    if (hasDeletionConsumed) {
+      return {
+        workflowId,
+        status: 'completed'
+      };
+    }
+
+    const hasRefundBlocked = events.some((event) => {
+      if (event.eventType !== 'high_risk_action_blocked') return false;
+      const payload = event.payload as Record<string, unknown>;
+      return payload.actionScope === 'execute:refund';
+    });
+
     return {
       workflowId,
-      status: 'blocked-awaiting-authority'
+      status: hasRefundBlocked ? 'blocked-awaiting-authority' : 'running'
     };
   }
 

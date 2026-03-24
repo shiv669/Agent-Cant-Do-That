@@ -1,5 +1,7 @@
-import { ForbiddenException, Injectable, OnModuleInit } from '@nestjs/common';
+import { ForbiddenException, Injectable, OnModuleInit, type MessageEvent } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import type { Subscription } from 'rxjs';
+import { Observable } from 'rxjs';
 import type {
   AuthorityWindowClaimInput,
   AuthorityWindowClaimResponse,
@@ -92,7 +94,9 @@ export class AuthorityService implements OnModuleInit {
         actionScope: input.actionScope,
         approverRole: approver.role,
         approverUserId: approver.userId,
-        bindingMessage
+        bindingMessage,
+        actionReason: input.actionReason,
+        reasoning: input.reasoning
       }
     });
 
@@ -174,7 +178,9 @@ export class AuthorityService implements OnModuleInit {
         actionScope: input.actionScope,
         approverRole: approver.role,
         approverIdentity: approver.userId,
-        approvedAt: cibaResult.approvedAt
+        approvedAt: cibaResult.approvedAt,
+        actionReason: input.actionReason,
+        reasoning: input.reasoning
       }
     });
 
@@ -202,7 +208,9 @@ export class AuthorityService implements OnModuleInit {
         actionScope: input.actionScope,
         boundAgentClientId: input.boundAgentClientId,
         ttlSeconds,
-        expiresAt: expiresAt.toISOString()
+        expiresAt: expiresAt.toISOString(),
+        actionReason: input.actionReason,
+        reasoning: input.reasoning
       }
     });
 
@@ -331,7 +339,9 @@ export class AuthorityService implements OnModuleInit {
       payload: {
         windowId: consumed.window_id,
         actionScope: consumed.action_scope,
-        claimantAgentClientId: input.claimantAgentClientId
+        claimantAgentClientId: input.claimantAgentClientId,
+        actionReason: input.actionReason,
+        reasoning: input.reasoning
       }
     });
 
@@ -434,6 +444,72 @@ export class AuthorityService implements OnModuleInit {
 
   async getWorkflowLedger(workflowId: string) {
     return this.ledgerRepository.listByWorkflowId(workflowId);
+  }
+
+  streamWorkflowLedger(workflowId: string, sinceSeqId?: number): Observable<MessageEvent> {
+    return new Observable<MessageEvent>((subscriber) => {
+      let closed = false;
+      let lastSeqId = Number.isFinite(sinceSeqId) ? Math.max(0, Number(sinceSeqId)) : 0;
+      let liveSub: Subscription | null = null;
+
+      const emitEvent = (event: { seqId: number; workflowId: string; eventType: string; createdAt: string; payload: Record<string, unknown> }) => {
+        if (closed || event.seqId <= lastSeqId) {
+          return;
+        }
+
+        lastSeqId = event.seqId;
+        subscriber.next({
+          id: String(event.seqId),
+          type: 'ledger_event',
+          data: event
+        });
+      };
+
+      const start = async () => {
+        const backlog =
+          lastSeqId > 0
+            ? await this.ledgerRepository.listByWorkflowIdSince(workflowId, lastSeqId)
+            : await this.ledgerRepository.listByWorkflowId(workflowId);
+
+        for (const event of backlog) {
+          emitEvent(event);
+        }
+
+        if (closed) {
+          return;
+        }
+
+        subscriber.next({
+          type: 'ready',
+          data: {
+            workflowId,
+            lastSeqId
+          }
+        });
+
+        liveSub = this.ledgerRepository.observeWorkflowEvents(workflowId).subscribe({
+          next: (event) => {
+            emitEvent(event);
+          },
+          error: (error) => {
+            if (!closed) {
+              subscriber.error(error);
+            }
+          }
+        });
+      };
+
+      void start().catch((error: unknown) => {
+        if (!closed) {
+          subscriber.error(error);
+        }
+      });
+
+      return () => {
+        closed = true;
+        liveSub?.unsubscribe();
+      };
+    });
   }
 
   async checkHighRiskAction(input: HighRiskAuthorityCheckInput): Promise<AuthorityCheckResponse> {

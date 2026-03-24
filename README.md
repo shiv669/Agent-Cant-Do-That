@@ -188,19 +188,19 @@ npm install
 
 ### 3. Configure environment
 
-Create `.env` in repository root from `.env.example` and set real Auth0 values.
+Create `.env` in repository root from `.env.example`.
 
-Required runtime keys:
+The current system expects these groups:
 
-- `PORT=4001`
-- `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/agentcantdothat`
-- `TEMPORAL_ADDRESS=localhost:7233`
-- `TEMPORAL_NAMESPACE=default`
-- `CFO_USER_ID=<auth0 user id>`
-- `DPO_USER_ID=<auth0 user id>`
-- Auth0 client and audience settings for Token Vault/CIBA
+- Core runtime: `PORT`, `NODE_ENV`, `DATABASE_URL`, `REDIS_URL`, `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`
+- Console + Auth0 session: `APP_BASE_URL`, `AUTH0_SECRET`, `NEXT_PUBLIC_API_URL`
+- Auth0 core and My Account: `AUTH0_DOMAIN`, `AUTH0_AUDIENCE`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET`, `AUTH0_MY_ACCOUNT_AUDIENCE`
+- CIBA and custom API clients: `AUTH0_CIBA_CLIENT_ID`, `AUTH0_CIBA_CLIENT_SECRET`, `AUTH0_CIBA_AUDIENCE`, `AUTH0_CUSTOM_API_CLIENT_ID`, `AUTH0_CUSTOM_API_CLIENT_SECRET`
+- Token Vault exchange: `AUTH0_TOKEN_VAULT_CLIENT_ID`, `AUTH0_TOKEN_VAULT_CLIENT_SECRET`, `AUTH0_CONNECTION_NAME`, `AUTH0_TOKEN_VAULT_REQUESTED_TOKEN_TYPE`
+- Approver and ops identities: `CFO_USER_ID`, `DPO_USER_ID`, `OPS_USER_ID` (optional fallback ops login also uses `OPS_MANAGER_EMAIL`, `OPS_MANAGER_PASSWORD`, `AUTH0_PASSWORD_REALM`)
+- Agent runtime model: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL_NAME`, `GROQ_API_KEY`
 
-Console URL config is in `apps/console/.env.local`:
+`NEXT_PUBLIC_API_URL` can stay in root `.env` or `apps/console/.env.local`. Default local value:
 
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:4001
@@ -250,8 +250,8 @@ If port `3000` is already in use, Next.js will move to `3001` automatically.
 
 ### 7. Demo run (full thesis flow)
 
-1. Start a workflow from the console homepage.
-2. Confirm low-risk actions log first:
+1. Start a workflow from the console homepage with a real customer id and refund amount.
+2. Confirm low-risk actions log first in live feed:
 	- `revoke_sso_access_completed`
 	- `billing_history_exported`
 	- `subscriptions_cancelled`
@@ -259,13 +259,14 @@ If port `3000` is already in use, Next.js will move to `3001` automatically.
 	- `customer_validation_passed`
 	- `data_stores_enumerated`
 	- `compliance_check_passed`
-4. Confirm first high-risk block.
+4. Confirm first high-risk block for refund.
 5. Trigger escalation + CFO approval path for refund.
 6. Consume/revoke refund authority window.
 7. Confirm second block for deletion (no authority carry-forward).
 8. Trigger DPO approval path for deletion.
 9. Consume/revoke deletion authority window.
 10. Confirm final ledger includes `cross_action_propagation_check_passed`.
+11. Open exported sheet and verify `BillingHistory`, `LiveFeed`, and `Summary` tabs are populated from ledger/evidence values.
 
 Example verified workflow id:
 
@@ -281,6 +282,15 @@ Sandbox and safety note:
 - Demo mode uses sandbox integrations only.
 - No real funds are moved.
 - No real customer data is deleted.
+
+---
+
+## Operational Notes
+
+- The console live feed is SSE-backed from `GET /api/authority/ledger/:workflowId/stream`.
+- Workflow status is derived from ledger events (running, blocked-awaiting-authority, completed, failed).
+- Refund amount is required input and validated server-side (`refundAmountUsd` must be positive).
+- Evidence export is Token Vault based; provider tokens are runtime-only and never persisted in application storage.
 
 ---
 

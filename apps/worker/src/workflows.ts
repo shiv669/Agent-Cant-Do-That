@@ -11,7 +11,7 @@ const { logStep } = proxyActivities<Activities>({
 export async function customerOffboardingWorkflow(input: { customerId: string }) {
   await logStep(`Starting offboarding workflow for ${input.customerId}`);
   await logStep('Low-risk actions completed');
-  await logStep('High-risk action requires authority window (placeholder)');
+  await logStep('High-risk action is blocked until authority window approval');
 
   return {
     status: 'blocked-awaiting-authority',
