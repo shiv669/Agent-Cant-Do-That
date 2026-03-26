@@ -1,4 +1,4 @@
-![Agent Can't Do That](./ACDT.png)
+![Agent Can't Do That](./ACDT_LOGO.png)
  # Agent Can't Do That
 
 Irreversible Authority Windows in Multi-Agent Systems
