@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import type { ActionScope } from '@contracts/index';
 
 type AuthzDecision = {
@@ -16,6 +16,7 @@ type ProviderToken = {
   accessToken: string;
   expiresIn: number;
   scope?: string;
+  refreshToken?: string;
 };
 
 type CibaAuthorizeResponse = {
@@ -30,6 +31,7 @@ type CibaPollResult =
       approvedAt: string;
       subjectToken: string;
       subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token';
+      refreshToken?: string;
     }
   | { status: 'denied'; reason: string }
   | { status: 'timeout'; reason: string };
@@ -233,7 +235,8 @@ export class Auth0AuthorityService {
     connection?: string;
     requestedTokenType?:
       | 'http://auth0.com/oauth/token-type/federated-connection-access-token'
-      | 'http://auth0.com/oauth/token-type/token-vault-access-token';
+      | 'http://auth0.com/oauth/token-type/token-vault-access-token'
+      | 'http://auth0.com/oauth/token-type/token-vault-refresh-token';
     loginHint?: string;
   }): Promise<ProviderToken> {
     const { domain, clientId, clientSecret } = this.getTokenVaultClientConfig();
@@ -271,13 +274,14 @@ export class Auth0AuthorityService {
 
     const payload = await this.readJson<{
       access_token?: string;
+      refresh_token?: string;
       expires_in?: number;
       scope?: string;
       error?: string;
       error_description?: string;
     }>(response);
 
-    if (!response.ok || !payload.access_token || !payload.expires_in) {
+    if (!response.ok) {
       const detail = payload.error_description ?? payload.error ?? 'Token Vault exchange failed';
       throw new Error(
         `Provider token mint failed (${response.status}): ${detail}` +
@@ -287,11 +291,50 @@ export class Auth0AuthorityService {
       );
     }
 
+    if (input.requestedTokenType === 'http://auth0.com/oauth/token-type/token-vault-refresh-token') {
+      if (!payload.refresh_token) {
+        throw new Error('Provider token mint failed: token-vault-refresh-token response missing refresh_token');
+      }
+
+      return {
+        accessToken: payload.refresh_token,
+        expiresIn: payload.expires_in ?? 0,
+        scope: payload.scope,
+        refreshToken: payload.refresh_token
+      };
+    }
+
+    if (!payload.access_token || !payload.expires_in) {
+      throw new Error('Provider token mint failed: response missing access_token or expires_in');
+    }
+
     return {
       accessToken: payload.access_token,
       expiresIn: payload.expires_in,
-      scope: payload.scope
+      scope: payload.scope,
+      refreshToken: payload.refresh_token
     };
+  }
+
+  async mintTokenVaultRefreshToken(input: {
+    subjectToken: string;
+    connection?: string;
+    loginHint?: string;
+  }): Promise<{ refreshToken: string }> {
+    const minted = await this.mintProviderAccessToken({
+      subjectToken: input.subjectToken,
+      subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token',
+      connection: input.connection,
+      requestedTokenType: 'http://auth0.com/oauth/token-type/token-vault-refresh-token',
+      loginHint: input.loginHint
+    });
+
+    const refreshToken = minted.refreshToken ?? minted.accessToken;
+    if (!refreshToken) {
+      throw new Error('Token Vault refresh token mint failed: missing refresh_token');
+    }
+
+    return { refreshToken };
   }
 
   async revokeExecutionToken(token: string): Promise<void> {
@@ -323,16 +366,22 @@ export class Auth0AuthorityService {
     actionScope: CibaScope;
     approverUserId: string;
     bindingMessage: string;
+    includeOfflineAccess?: boolean;
   }): Promise<CibaAuthorizeResponse> {
     const { domain, audience, clientId, clientSecret } = this.getCibaClientConfig();
     if (!domain || !clientId || !clientSecret) {
       throw new Error('Missing Auth0 CIBA configuration');
     }
 
+    const scopeParts = ['openid', input.actionScope];
+    if (input.includeOfflineAccess) {
+      scopeParts.push('offline_access');
+    }
+
     const bodyParams: Record<string, string> = {
       client_id: clientId,
       client_secret: clientSecret,
-      scope: `openid ${input.actionScope}`,
+      scope: scopeParts.join(' '),
       login_hint: JSON.stringify({
         format: 'iss_sub',
         iss: `https://${domain}/`,
@@ -400,6 +449,91 @@ export class Auth0AuthorityService {
     };
   }
 
+  async getUserRefreshTokenViaCiba(input: {
+    userId: string;
+    bindingMessage: string;
+    scope?: CibaScope;
+  }): Promise<{ subjectToken: string; refreshToken: string; subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token' }> {
+    const cibaRequest = await this.requestCibaApproval({
+      actionScope: input.scope ?? 'openid',
+      approverUserId: input.userId,
+      bindingMessage: input.bindingMessage,
+      includeOfflineAccess: true
+    });
+
+    const cibaResult = await this.pollCibaApproval({
+      authReqId: cibaRequest.authReqId,
+      intervalSeconds: cibaRequest.interval,
+      maxWaitSeconds: cibaRequest.expiresIn
+    });
+
+    if (cibaResult.status !== 'approved') {
+      throw new ForbiddenException({ reason: cibaResult.reason });
+    }
+
+    if (!cibaResult.refreshToken) {
+      throw new ForbiddenException({
+        reason:
+          'demo_bootstrap_failed — no refresh_token returned by Auth0. Enable offline_access and refresh token issuance for the CIBA application, then retry bootstrap.'
+      });
+    }
+
+    return {
+      subjectToken: cibaResult.subjectToken,
+      refreshToken: cibaResult.refreshToken,
+      subjectTokenType: cibaResult.subjectTokenType
+    };
+  }
+
+  async mintAccessTokenFromRefreshToken(input: {
+    refreshToken: string;
+    scope?: CibaScope;
+  }): Promise<{ accessToken: string; expiresIn: number }> {
+    const { domain, audience, clientId, clientSecret } = this.getCibaClientConfig();
+    if (!domain || !clientId || !clientSecret) {
+      throw new Error('Missing Auth0 CIBA refresh-token configuration');
+    }
+
+    const params: Record<string, string> = {
+      grant_type: 'refresh_token',
+      refresh_token: input.refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret
+    };
+
+    const normalizedAudience = audience?.trim();
+    if (normalizedAudience) {
+      params.audience = normalizedAudience;
+    }
+
+    if (input.scope) {
+      params.scope = `openid ${input.scope}`;
+    }
+
+    const response = await fetch(`https://${domain}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(params).toString()
+    });
+
+    const payload = await this.readJson<{
+      access_token?: string;
+      expires_in?: number;
+      error?: string;
+      error_description?: string;
+    }>(response);
+
+    if (!response.ok || !payload.access_token || !payload.expires_in) {
+      const detail = payload.error_description ?? payload.error ?? 'Refresh token exchange failed';
+      throw new Error(`Refresh token exchange failed (${response.status}): ${detail}`);
+    }
+
+    return {
+      accessToken: payload.access_token,
+      expiresIn: payload.expires_in
+    };
+  }
+
   async pollCibaApproval(input: {
     authReqId: string;
     intervalSeconds: number;
@@ -429,6 +563,7 @@ export class Auth0AuthorityService {
 
       const payload = await this.readJson<{
         access_token?: string;
+        refresh_token?: string;
         error?: string;
         error_description?: string;
       }>(response);
@@ -439,7 +574,8 @@ export class Auth0AuthorityService {
             status: 'approved',
             approvedAt: new Date().toISOString(),
             subjectToken: payload.access_token,
-            subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token'
+            subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token',
+            refreshToken: payload.refresh_token
           };
         }
 

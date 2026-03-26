@@ -25,11 +25,6 @@ type WindowInfo = {
 
 type ClaimByScope = Partial<Record<HighRiskAction, AuthorityWindowClaimResponse>>;
 type RunMode = 'demo' | 'live';
-type DemoTokens = {
-  opsManager: string;
-  cfo: string;
-  dpo: string;
-};
 
 type OffboardingReason = 'contract_termination' | 'fraud_review' | 'compliance_exit' | 'customer_request';
 type EventMessage = { base: string };
@@ -40,12 +35,6 @@ const OFFBOARDING_REASONS: Array<{ value: OffboardingReason; label: string }> = 
   { value: 'compliance_exit', label: 'compliance_exit' },
   { value: 'customer_request', label: 'customer_request' }
 ];
-
-const DEMO_TOKEN_STORAGE_KEYS = {
-  opsManager: 'acdt.demo.token.opsManager',
-  cfo: 'acdt.demo.token.cfo',
-  dpo: 'acdt.demo.token.dpo'
-} as const;
 
 const cardReveal = {
   hidden: { opacity: 0, y: 8 },
@@ -90,6 +79,27 @@ function prettyScope(scope: HighRiskAction | string): string {
 
 function toMoney(value: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value);
+}
+
+async function buildHttpError(response: Response, fallback: string): Promise<Error> {
+  let detail = '';
+  try {
+    const payload = (await response.json()) as { reason?: string; message?: string | string[] };
+    if (typeof payload.reason === 'string' && payload.reason.trim()) {
+      detail = payload.reason.trim();
+    } else if (typeof payload.message === 'string' && payload.message.trim()) {
+      detail = payload.message.trim();
+    } else if (Array.isArray(payload.message) && payload.message.length > 0) {
+      detail = String(payload.message[0] ?? '').trim();
+    }
+  } catch {
+    // Ignore body parse failures and use fallback text.
+  }
+
+  if (detail) {
+    return new Error(`${fallback} (${response.status}): ${detail}`);
+  }
+  return new Error(`${fallback} (${response.status})`);
 }
 
 function eventActor(event: LedgerEvent): string {
@@ -292,7 +302,6 @@ export default function HomePage() {
   const [nowMs, setNowMs] = useState(Date.now());
   const [latestEventSeqId, setLatestEventSeqId] = useState<number | null>(null);
   const [demoCountdown, setDemoCountdown] = useState<{ label: string; secondsLeft: number } | null>(null);
-  const [demoTokens, setDemoTokens] = useState<DemoTokens>({ opsManager: '', cfo: '', dpo: '' });
   const [fallbackEvidence, setFallbackEvidence] = useState<{
     tokenSource: string;
     sheetUrl: string;
@@ -302,41 +311,6 @@ export default function HomePage() {
   } | null>(null);
 
   const makeRequestId = () => `req_${Math.random().toString(36).slice(2, 10)}`;
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const pickToken = (primaryKey: string, fallbackKeys: string[]) => {
-      const fromLocal = window.localStorage.getItem(primaryKey);
-      if (fromLocal && fromLocal.trim()) return fromLocal;
-
-      const fromSessionPrimary = window.sessionStorage.getItem(primaryKey);
-      if (fromSessionPrimary && fromSessionPrimary.trim()) return fromSessionPrimary;
-
-      for (const key of fallbackKeys) {
-        const local = window.localStorage.getItem(key);
-        if (local && local.trim()) return local;
-        const session = window.sessionStorage.getItem(key);
-        if (session && session.trim()) return session;
-      }
-
-      return '';
-    };
-
-    setDemoTokens({
-      opsManager: pickToken(DEMO_TOKEN_STORAGE_KEYS.opsManager, ['opsSubjectToken', 'ops_manager_token']),
-      cfo: pickToken(DEMO_TOKEN_STORAGE_KEYS.cfo, ['cfoAuthorityToken', 'cfo_token']),
-      dpo: pickToken(DEMO_TOKEN_STORAGE_KEYS.dpo, ['dpoAuthorityToken', 'dpo_token'])
-    });
-  }, []);
-
-  const persistDemoTokens = (next: DemoTokens) => {
-    setDemoTokens(next);
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(DEMO_TOKEN_STORAGE_KEYS.opsManager, next.opsManager);
-    window.localStorage.setItem(DEMO_TOKEN_STORAGE_KEYS.cfo, next.cfo);
-    window.localStorage.setItem(DEMO_TOKEN_STORAGE_KEYS.dpo, next.dpo);
-  };
 
   const appendSyntheticEvent = (eventType: string, payload: Record<string, unknown>) => {
     setEvents((prev) => {
@@ -441,7 +415,14 @@ export default function HomePage() {
 
     const upsertEvent = (incoming: LedgerEvent) => {
       setEvents((prev) => {
-        if (prev.some((event) => event.seqId === incoming.seqId)) {
+        if (
+          prev.some(
+            (event) =>
+              event.seqId === incoming.seqId &&
+              event.eventType === incoming.eventType &&
+              event.createdAt === incoming.createdAt
+          )
+        ) {
           return prev;
         }
 
@@ -629,10 +610,6 @@ export default function HomePage() {
     }
 
     try {
-      if (mode === 'demo' && !demoTokens.opsManager.trim()) {
-        throw new Error('Demo mode requires cached ops-manager token. Run live once or preload demo token cache.');
-      }
-
       const response = await fetch(`${apiBase}/api/workflows/offboarding/start`, {
         method: 'POST',
         headers: {
@@ -642,12 +619,12 @@ export default function HomePage() {
         body: JSON.stringify({
           customerId: normalizedCustomer,
           refundAmountUsd: parsedRefundAmount,
-          opsSubjectToken: mode === 'demo' ? demoTokens.opsManager : undefined
+          demoMode: mode === 'demo'
         })
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to start workflow (${response.status})`);
+        throw await buildHttpError(response, 'Failed to start workflow');
       }
 
       const payload = (await response.json()) as StartOffboardingResponse;
@@ -678,25 +655,60 @@ export default function HomePage() {
 
     if (mode === 'demo') {
       try {
-        const requestId = makeRequestId();
         const claimant = scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1';
-        const cachedRoleToken = scope === 'execute:refund' ? demoTokens.cfo : demoTokens.dpo;
-        if (!cachedRoleToken.trim()) {
-          throw new Error(`Demo mode missing cached ${scope === 'execute:refund' ? 'CFO' : 'DPO'} token.`);
+        await runCountdown(`${scope === 'execute:refund' ? 'cfo' : 'dpo'} approval (demo)`, 5);
+
+        const requestResponse = await fetch(`${apiBase}/api/authority/window/request`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-agent-client-id': 'orchestrator-agent-v1'
+          },
+          body: JSON.stringify({
+            workflowId,
+            customerId: startedCustomerId,
+            actionScope: scope,
+            boundAgentClientId: claimant,
+            amount: scope === 'execute:refund' ? startedRefundAmount : undefined,
+            ttlSeconds: 120,
+            demoMode: true
+          })
+        });
+
+        if (!requestResponse.ok) {
+          throw await buildHttpError(requestResponse, 'Authority request failed');
         }
+
+        const request = (await requestResponse.json()) as AuthorityWindowRequestResponse;
+
+        const claimResponse = await fetch(`${apiBase}/api/authority/window/claim`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-agent-client-id': claimant
+          },
+          body: JSON.stringify({
+            windowId: request.windowId
+          })
+        });
+
+        if (!claimResponse.ok) {
+          throw await buildHttpError(claimResponse, 'Authority claim failed');
+        }
+
+        const claim = (await claimResponse.json()) as AuthorityWindowClaimResponse;
         appendSyntheticEvent('step_up_requested', {
           actor: 'orchestrator-agent-v1',
           requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
+          request_id: makeRequestId(),
           actionScope: scope,
           approverRole: scope === 'execute:refund' ? 'CFO' : 'DPO',
           mode: 'demo'
         });
-        await runCountdown(`${scope === 'execute:refund' ? 'cfo' : 'dpo'} approval (demo)`, 5);
         appendSyntheticEvent('step_up_approved', {
           actor: 'authority-system',
           requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
+          request_id: makeRequestId(),
           actionScope: scope,
           approverRole: scope === 'execute:refund' ? 'CFO' : 'DPO',
           mode: 'demo'
@@ -704,44 +716,14 @@ export default function HomePage() {
         appendSyntheticEvent('workflow_resumed', {
           actor: 'orchestrator-agent-v1',
           requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
+          request_id: makeRequestId(),
           trigger: 'authority_granted',
-          mode: 'demo'
-        });
-
-        const demoWindowId = `demo_${scope.replace('execute:', '')}_${Date.now()}`;
-        const expiresAt = new Date(Date.now() + 120000).toISOString();
-        appendSyntheticEvent('authority_window_requested', {
-          actor: 'authority-system',
-          requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
-          windowId: demoWindowId,
-          actionScope: scope,
-          ttlSeconds: 120,
-          expiresAt,
-          mode: 'demo'
-        });
-        appendSyntheticEvent('authority_window_claimed', {
-          actor: claimant,
-          requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
-          windowId: demoWindowId,
-          actionScope: scope,
-          expiresAt,
           mode: 'demo'
         });
 
         setClaimsByScope((prev) => ({
           ...prev,
-          [scope]: {
-            windowId: demoWindowId,
-            workflowId,
-            actionScope: scope,
-            claimantAgentClientId: claimant,
-            status: 'claimed',
-            authorityWindowToken: cachedRoleToken,
-            expiresAt
-          }
+          [scope]: claim
         }));
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Authority request failed');
@@ -782,7 +764,7 @@ export default function HomePage() {
       });
 
       if (!requestResponse.ok) {
-        throw new Error(`Authority request failed (${requestResponse.status})`);
+        throw await buildHttpError(requestResponse, 'Authority request failed');
       }
 
       const request = (await requestResponse.json()) as AuthorityWindowRequestResponse;
@@ -799,16 +781,10 @@ export default function HomePage() {
       });
 
       if (!claimResponse.ok) {
-        throw new Error(`Authority claim failed (${claimResponse.status})`);
+        throw await buildHttpError(claimResponse, 'Authority claim failed');
       }
 
       const claim = (await claimResponse.json()) as AuthorityWindowClaimResponse;
-
-      persistDemoTokens({
-        opsManager: demoTokens.opsManager,
-        cfo: scope === 'execute:refund' ? claim.authorityWindowToken : demoTokens.cfo,
-        dpo: scope === 'execute:data_deletion' ? claim.authorityWindowToken : demoTokens.dpo
-      });
 
       setClaimsByScope((prev) => ({
         ...prev,
@@ -828,100 +804,6 @@ export default function HomePage() {
     setError(null);
     setIsExecutingAction(true);
 
-    if (mode === 'demo') {
-      try {
-        const requestId = makeRequestId();
-        const actor = scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1';
-        appendSyntheticEvent('token_acquired', {
-          actor,
-          requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
-          source: 'auth0_token_vault',
-          scope,
-          target_service: scope === 'execute:refund' ? 'billing-service-v1' : 'data-service-v1',
-          exposure_window: 'active',
-          mode: 'demo'
-        });
-        appendSyntheticEvent('authority_window_consumed', {
-          actor,
-          requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
-          windowId: claim.windowId,
-          actionScope: scope,
-          mode: 'demo'
-        });
-        appendSyntheticEvent('authority_token_revoked', {
-          actor: 'authority-system',
-          requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
-          exposure_window: 'closed',
-          system_permission: 'revoked',
-          mode: 'demo'
-        });
-        appendSyntheticEvent('system_enforcement_active', {
-          actor: 'authority-system',
-          requested_by: 'orchestrator-agent-v1',
-          request_id: requestId,
-          token_reuse: 'rejected_by_system',
-          mode: 'demo'
-        });
-
-        setClaimsByScope((prev) => {
-          const next = { ...prev };
-          delete next[scope];
-          return next;
-        });
-
-        if (scope === 'execute:refund') {
-          const deletionReqId = makeRequestId();
-          appendSyntheticEvent('execution_attempt', {
-            actor: 'data-agent-v1',
-            requested_by: 'orchestrator-agent-v1',
-            request_id: deletionReqId,
-            action: 'execute:data_deletion',
-            mode: 'demo'
-          });
-          appendSyntheticEvent('high_risk_action_blocked', {
-            actor: 'authority-system',
-            requested_by: 'orchestrator-agent-v1',
-            request_id: deletionReqId,
-            actionScope: 'execute:data_deletion',
-            missing_scope: 'execute:data_deletion',
-            previous_approval: 'NOT_CARRIED_FORWARD',
-            decision: 'blocked',
-            policy: 'authority_required',
-            risk: 'high',
-            mode: 'demo'
-          });
-        }
-
-        if (scope === 'execute:data_deletion') {
-          appendSyntheticEvent('workflow_completed', {
-            actor: 'authority-system',
-            requested_by: 'orchestrator-agent-v1',
-            request_id: makeRequestId(),
-            exposure_window: 'minimized',
-            authority_windows_used: 2,
-            replay_attempts_blocked: 1,
-            mode: 'demo'
-          });
-          appendSyntheticEvent('replay_attempt_blocked', {
-            actor: 'authority-system',
-            requested_by: 'orchestrator-agent-v1',
-            request_id: makeRequestId(),
-            result: '403_forbidden',
-            reason: 'authority_consumed',
-            mode: 'demo'
-          });
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Execution failed');
-      } finally {
-        setIsExecutingAction(false);
-      }
-      return;
-    }
-
     try {
       const response = await fetch(`${apiBase}/api/authority/window/consume`, {
         method: 'POST',
@@ -935,7 +817,7 @@ export default function HomePage() {
       });
 
       if (!response.ok) {
-        throw new Error(`Execution failed (${response.status})`);
+        throw await buildHttpError(response, 'Execution failed');
       }
 
       setClaimsByScope((prev) => {
@@ -1213,7 +1095,7 @@ export default function HomePage() {
                 <AnimatePresence initial={false}>
                 {events.map((event) => (
                   <motion.div
-                    key={`${event.workflowId}-${event.seqId}`}
+                    key={`${event.workflowId}-${event.seqId}-${event.eventType}-${event.createdAt}`}
                     className="grid grid-cols-[120px_170px_minmax(0,1fr)] border-b border-zinc-800/70 py-1"
                     variants={rowReveal}
                     initial="hidden"

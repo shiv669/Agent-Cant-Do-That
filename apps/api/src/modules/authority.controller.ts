@@ -10,10 +10,14 @@ import type {
   HighRiskAuthorityCheckInput
 } from '@contracts/index';
 import { AuthorityService } from './authority.service';
+import { DemoTokenService } from './demo-token.service';
 
 @Controller('authority')
 export class AuthorityController {
-  constructor(private readonly authorityService: AuthorityService) {}
+  constructor(
+    private readonly authorityService: AuthorityService,
+    private readonly demoTokenService: DemoTokenService
+  ) {}
 
   private getAgentClientId(request: { headers: Record<string, string | string[] | undefined> }): string {
     const header = request.headers['x-agent-client-id'];
@@ -40,12 +44,12 @@ export class AuthorityController {
 
   @Post('window/request')
   async requestAuthorityWindow(
-    @Body() body: AuthorityWindowRequestInput & { agentId?: string; scope?: string },
+    @Body() body: AuthorityWindowRequestInput & { agentId?: string; scope?: string; demoMode?: boolean },
     @Req() req: { headers: Record<string, string | string[] | undefined> }
   ) {
     const agentClientId = this.getAgentClientId(req);
 
-    const normalized: AuthorityWindowRequestInput = {
+    const normalized: AuthorityWindowRequestInput & { demoMode?: boolean; demoSubjectToken?: string } = {
       workflowId: body.workflowId,
       customerId: body.customerId,
       actionScope: (body.actionScope ?? body.scope) as AuthorityWindowRequestInput['actionScope'],
@@ -56,6 +60,14 @@ export class AuthorityController {
       actionReason: body.actionReason,
       reasoning: body.reasoning
     };
+
+    if (body.demoMode) {
+      normalized.demoMode = true;
+      normalized.demoSubjectToken =
+        normalized.actionScope === 'execute:refund'
+          ? await this.demoTokenService.getRequiredToken('cfo')
+          : await this.demoTokenService.getRequiredToken('dpo');
+    }
 
     return this.authorityService.requestAuthorityWindow(normalized);
   }

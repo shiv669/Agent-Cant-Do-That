@@ -199,6 +199,13 @@ The current system expects these groups:
 - Token Vault exchange: `AUTH0_TOKEN_VAULT_CLIENT_ID`, `AUTH0_TOKEN_VAULT_CLIENT_SECRET`, `AUTH0_CONNECTION_NAME`, `AUTH0_TOKEN_VAULT_REQUESTED_TOKEN_TYPE`
 - Approver and ops identities: `CFO_USER_ID`, `DPO_USER_ID`, `OPS_USER_ID` (optional fallback ops login also uses `OPS_MANAGER_EMAIL`, `OPS_MANAGER_PASSWORD`, `AUTH0_PASSWORD_REALM`)
 - Agent runtime model: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL_NAME`, `GROQ_API_KEY`
+- Demo token controls (deployment-safe demo mode): `DEMO_MODE_ENABLED`, `DEMO_ADMIN_KEY`
+
+Demo mode notes:
+
+- Demo mode no longer reads authority tokens from browser storage.
+- Demo tokens are managed server-side and scoped by role (`ops-manager`, `cfo`, `dpo`).
+- Demo token bootstrap and status APIs are protected by `x-demo-admin-key`.
 
 `NEXT_PUBLIC_API_URL` can stay in root `.env` or `apps/console/.env.local`. Default local value:
 
@@ -271,6 +278,63 @@ If port `3000` is already in use, Next.js will move to `3001` automatically.
 Example verified workflow id:
 
 - `offboarding-final-e2e-002-1774177327353`
+
+### 7.1 Demo token bootstrap (required for demo mode)
+
+Before using demo mode, run bootstrap once per environment. This stores per-role refresh tokens server-side and demo requests mint fresh access tokens on-demand.
+
+1. Set env values in API runtime:
+	- `DEMO_MODE_ENABLED=true`
+	- `DEMO_ADMIN_KEY=<strong-random-value>`
+2. Ensure approver identities are configured:
+	- `OPS_USER_ID`
+	- `CFO_USER_ID`
+	- `DPO_USER_ID`
+3. Bootstrap demo auth (one-time CIBA approvals for ops/CFO/DPO users):
+
+```bash
+curl -X POST http://localhost:4001/api/demo/admin/bootstrap-tokens \
+  -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+```
+
+4. Check demo status:
+
+```bash
+curl http://localhost:4001/api/demo/admin/status \
+  -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+```
+
+5. Optional clear/reset:
+
+```bash
+curl -X POST http://localhost:4001/api/demo/admin/clear-tokens \
+  -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+```
+
+If demo returns `demo_token_expired — re-run bootstrap`, the stored Token Vault refresh token is missing, expired, or revoked. Re-run bootstrap.
+
+### 7.2 Demo mode quick notes (short)
+
+- How demo works:
+	- One-time bootstrap via CIBA approval per role (`ops-manager`, `cfo`, `dpo`).
+	- Role refresh artifacts are stored server-side only (Postgres), never in browser storage.
+	- For each demo action, API mints a fresh short-lived access token on-demand.
+	- Authority lifecycle is unchanged: request -> claim -> consume -> revoke.
+- What it uses:
+	- Auth0 CIBA for one-time bootstrap approval.
+	- Auth0 token endpoint for on-demand refresh exchange.
+	- Auth0 Token Vault path for real provider access in execution/evidence flow.
+- Env added for demo ops:
+	- `DEMO_MODE_ENABLED=true`
+	- `DEMO_ADMIN_KEY=<secret>`
+- Commands run (PowerShell):
+	- `$headers = @{ "x-demo-admin-key" = "<DEMO_ADMIN_KEY>" }`
+	- `Invoke-RestMethod -Method Post -Uri "http://localhost:4001/api/demo/admin/bootstrap-tokens" -Headers $headers`
+	- `Invoke-RestMethod -Method Get -Uri "http://localhost:4001/api/demo/admin/status" -Headers $headers | ConvertTo-Json -Depth 8`
+- Trade-offs (short):
+	- Pro: no daily manual approvals for demo runs.
+	- Pro: access tokens stay short-lived and action-scoped.
+	- Con: if Auth0 refresh artifacts are revoked or tenant policy changes, bootstrap is needed again.
 
 ### 8. Stop infrastructure
 

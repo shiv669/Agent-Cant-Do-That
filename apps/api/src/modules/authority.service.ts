@@ -46,7 +46,9 @@ export class AuthorityService implements OnModuleInit {
     }
   }
 
-  async requestAuthorityWindow(input: AuthorityWindowRequestInput): Promise<AuthorityWindowRequestResponse> {
+  async requestAuthorityWindow(
+    input: AuthorityWindowRequestInput & { demoMode?: boolean; demoSubjectToken?: string }
+  ): Promise<AuthorityWindowRequestResponse> {
     if (input.actionScope === 'execute:refund' && typeof input.amount !== 'number') {
       throw new ForbiddenException({ reason: 'Refund requests must include amount for CIBA binding message' });
     }
@@ -100,38 +102,56 @@ export class AuthorityService implements OnModuleInit {
       }
     });
 
-    let cibaRequest: { authReqId: string; interval: number; expiresIn: number };
-    try {
-      cibaRequest = await this.auth0AuthorityService.requestCibaApproval({
-        actionScope: input.actionScope,
-        approverUserId: approver.userId,
-        bindingMessage
-      });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : 'Step-up request failed';
-      await this.ledgerRepository.appendEvent({
-        workflowId: input.workflowId,
-        eventType: 'step_up_denied',
-        payload: {
-          actionScope: input.actionScope,
-          approverRole: approver.role,
-          approverUserId: approver.userId,
-          reason
-        }
-      });
+    let cibaResult:
+      | { status: 'approved'; approvedAt: string; subjectToken: string; subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token' }
+      | { status: 'denied'; reason: string }
+      | { status: 'timeout'; reason: string };
 
-      throw new ForbiddenException({
-        workflowId: input.workflowId,
-        actionScope: input.actionScope,
-        reason
+    if (input.demoMode) {
+      if (!input.demoSubjectToken) {
+        throw new ForbiddenException({ reason: 'Demo subject token is required for demoMode authority requests' });
+      }
+
+      cibaResult = {
+        status: 'approved',
+        approvedAt: new Date().toISOString(),
+        subjectToken: input.demoSubjectToken,
+        subjectTokenType: 'urn:ietf:params:oauth:token-type:access_token'
+      };
+    } else {
+      let cibaRequest: { authReqId: string; interval: number; expiresIn: number };
+      try {
+        cibaRequest = await this.auth0AuthorityService.requestCibaApproval({
+          actionScope: input.actionScope,
+          approverUserId: approver.userId,
+          bindingMessage
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'Step-up request failed';
+        await this.ledgerRepository.appendEvent({
+          workflowId: input.workflowId,
+          eventType: 'step_up_denied',
+          payload: {
+            actionScope: input.actionScope,
+            approverRole: approver.role,
+            approverUserId: approver.userId,
+            reason
+          }
+        });
+
+        throw new ForbiddenException({
+          workflowId: input.workflowId,
+          actionScope: input.actionScope,
+          reason
+        });
+      }
+
+      cibaResult = await this.auth0AuthorityService.pollCibaApproval({
+        authReqId: cibaRequest.authReqId,
+        intervalSeconds: cibaRequest.interval,
+        maxWaitSeconds: cibaRequest.expiresIn
       });
     }
-
-    const cibaResult = await this.auth0AuthorityService.pollCibaApproval({
-      authReqId: cibaRequest.authReqId,
-      intervalSeconds: cibaRequest.interval,
-      maxWaitSeconds: cibaRequest.expiresIn
-    });
 
     if (cibaResult.status === 'denied') {
       await this.ledgerRepository.appendEvent({

@@ -9,10 +9,12 @@ import { WorkflowsController } from './workflows.controller';
 import { WorkflowsService } from './workflows.service';
 import { LedgerRepository } from './ledger.repository';
 import { EvidenceSheetService } from './evidence-sheet.service';
+import { DemoController } from './demo.controller';
+import { DemoTokenService } from './demo-token.service';
 
 @Module({
   imports: [],
-  controllers: [HealthController, WorkflowsController, AuthorityController],
+  controllers: [HealthController, WorkflowsController, AuthorityController, DemoController],
   providers: [
     WorkflowsService,
     LedgerRepository,
@@ -20,7 +22,8 @@ import { EvidenceSheetService } from './evidence-sheet.service';
     Auth0AuthorityService,
     AuthorityWindowRepository,
     AgentRuntimeService,
-    EvidenceSheetService
+    EvidenceSheetService,
+    DemoTokenService
   ]
 })
 export class AppModule {}
