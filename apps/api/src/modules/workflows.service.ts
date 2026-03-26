@@ -68,9 +68,22 @@ export class WorkflowsService implements OnModuleInit {
       amountUsd: input.amountUsd
     });
 
+    const agentIdByAction: Record<string, string> = {
+      revoke_access: 'identity-agent-v1',
+      export_billing_history: 'billing-agent-v1',
+      cancel_subscriptions: 'billing-agent-v1',
+      validate_customer_state: 'compliance-agent-v1',
+      enumerate_data_stores: 'data-agent-v1',
+      run_compliance_check: 'compliance-agent-v1',
+      execute_refund: 'billing-agent-v1',
+      execute_data_deletion: 'data-agent-v1'
+    };
+
+    const resolvedAgentId = agentIdByAction[input.action] ?? 'orchestrator-agent-v1';
+
     return {
-      actor: 'autonomous_agent',
-      agentId: 'orchestrator-agent-v1',
+      actor: resolvedAgentId,
+      agentId: resolvedAgentId,
       actionName: decision.action,
       actionReason: decision.actionReason,
       reasoning: decision.reasoning,

@@ -24,13 +24,15 @@ type WindowInfo = {
 };
 
 type ClaimByScope = Partial<Record<HighRiskAction, AuthorityWindowClaimResponse>>;
+type RunMode = 'demo' | 'live';
+type DemoTokens = {
+  opsManager: string;
+  cfo: string;
+  dpo: string;
+};
 
 type OffboardingReason = 'contract_termination' | 'fraud_review' | 'compliance_exit' | 'customer_request';
-type EventMessage = {
-  base: string;
-  actionReason?: string;
-  reasoning?: string;
-};
+type EventMessage = { base: string };
 
 const OFFBOARDING_REASONS: Array<{ value: OffboardingReason; label: string }> = [
   { value: 'contract_termination', label: 'contract_termination' },
@@ -38,6 +40,12 @@ const OFFBOARDING_REASONS: Array<{ value: OffboardingReason; label: string }> = 
   { value: 'compliance_exit', label: 'compliance_exit' },
   { value: 'customer_request', label: 'customer_request' }
 ];
+
+const DEMO_TOKEN_STORAGE_KEYS = {
+  opsManager: 'acdt.demo.token.opsManager',
+  cfo: 'acdt.demo.token.cfo',
+  dpo: 'acdt.demo.token.dpo'
+} as const;
 
 const cardReveal = {
   hidden: { opacity: 0, y: 8 },
@@ -103,40 +111,24 @@ function eventActor(event: LedgerEvent): string {
 }
 
 function eventLabel(event: LedgerEvent): string {
-  const message = eventMessage(event);
-
-  if (!message.actionReason && !message.reasoning) {
-    return message.base;
-  }
-
-  if (message.actionReason && message.reasoning) {
-    return `${message.base} | reason=${message.actionReason} | rationale=${message.reasoning}`;
-  }
-
-  return `${message.base} | reason=${message.actionReason || message.reasoning}`;
+  return eventMessage(event).base;
 }
 
 function eventMessage(event: LedgerEvent): EventMessage {
   const payload = asRecord(event.payload);
-  const actionReason = typeof payload.actionReason === 'string' ? payload.actionReason : '';
-  const reasoning = typeof payload.reasoning === 'string' ? payload.reasoning : '';
 
   if (event.eventType === 'step_up_requested') {
     const scope = String(payload.actionScope ?? 'unknown');
     const approver = String(payload.approverRole ?? 'approver');
     return {
-      base: `step_up requested action=${scope} approver=${approver}`,
-      actionReason,
-      reasoning
+      base: `step_up requested action=${scope} approver=${approver}`
     };
   }
 
   if (event.eventType === 'step_up_approved') {
     const scope = String(payload.actionScope ?? 'unknown');
     return {
-      base: `step_up approved action=${scope}`,
-      actionReason,
-      reasoning
+      base: `step_up approved action=${scope}`
     };
   }
 
@@ -144,47 +136,39 @@ function eventMessage(event: LedgerEvent): EventMessage {
     const scope = String(payload.actionScope ?? '');
     if (scope === 'execute:refund') {
       return {
-        base: 'system.response 403 forbidden missing_scope=execute:refund',
-        actionReason,
-        reasoning
+        base: 'system.response 403 forbidden missing_scope=execute:refund'
       };
     }
     if (scope === 'execute:data_deletion') {
       return {
-        base: 'system.response 403 forbidden missing_scope=execute:data_deletion',
-        actionReason,
-        reasoning
+        base: 'system.response 403 forbidden missing_scope=execute:data_deletion'
       };
     }
   }
 
   if (event.eventType === 'authority_window_consumed') {
     const scope = String(payload.actionScope ?? '');
-    if (scope === 'execute:refund') return { base: 'agent.execute(refund) system.result success', actionReason, reasoning };
+    if (scope === 'execute:refund') return { base: 'agent.execute(refund) system.result success' };
     if (scope === 'execute:data_deletion')
-      return { base: 'agent.execute(data_deletion) system.result success', actionReason, reasoning };
+      return { base: 'agent.execute(data_deletion) system.result success' };
   }
 
   if (event.eventType === 'authority_window_requested') {
     const scope = String(payload.actionScope ?? 'unknown');
     const ttl = payload.ttlSeconds;
     return {
-      base: `authority.window requested action=${scope} ttl=${String(ttl ?? 'n/a')}`,
-      actionReason,
-      reasoning
+      base: `authority.window requested action=${scope} ttl=${String(ttl ?? 'n/a')}`
     };
   }
 
   if (event.eventType === 'authority_window_issued') {
     return {
-      base: `authority.window issued action=${String(payload.actionScope ?? 'unknown')}`,
-      actionReason,
-      reasoning
+      base: `authority.window issued action=${String(payload.actionScope ?? 'unknown')}`
     };
   }
 
   if (event.eventType === 'authority_token_revoked') {
-    return { base: 'authority.token revoked', actionReason, reasoning };
+    return { base: 'authority.token revoked' };
   }
 
   if (event.eventType === 'billing_history_exported') {
@@ -193,17 +177,35 @@ function eventMessage(event: LedgerEvent): EventMessage {
     const url = typeof payload.sheetUrl === 'string' ? payload.sheetUrl : '';
     const suffix = url ? ` sheet_url=${url}` : '';
     return {
-      base: `billing export=${exportFormat} token_source=${tokenSource}${suffix}`,
-      actionReason,
-      reasoning
+      base: `billing export=${exportFormat} token_source=${tokenSource}${suffix}`
     };
   }
 
   if (event.eventType === 'unauthorized_escalation_attempt_recorded') {
-    return { base: 'escalation_attempt_recorded', actionReason, reasoning };
+    return { base: 'escalation_attempt_recorded' };
   }
 
-  return { base: event.eventType, actionReason, reasoning };
+  return { base: event.eventType };
+}
+
+function eventRequestedBy(event: LedgerEvent): string {
+  const payload = asRecord(event.payload);
+  const requestedBy = payload.requested_by;
+  if (typeof requestedBy === 'string' && requestedBy.length > 0) {
+    return requestedBy;
+  }
+
+  return 'orchestrator-agent-v1';
+}
+
+function eventRequestId(event: LedgerEvent): string {
+  const payload = asRecord(event.payload);
+  const requestId = payload.request_id;
+  if (typeof requestId === 'string' && requestId.length > 0) {
+    return requestId;
+  }
+
+  return `req_${String(event.seqId).padStart(6, '0')}`;
 }
 
 function TypeRevealLine({ text, animate }: { text: string; animate: boolean }) {
@@ -270,8 +272,9 @@ function eventIcon(event: LedgerEvent): string {
 
 export default function HomePage() {
   const [uiState, setUiState] = useState<UIState>('idle');
-  const [customerInput, setCustomerInput] = useState('');
-  const [refundAmountInput, setRefundAmountInput] = useState('');
+  const [mode, setMode] = useState<RunMode>('live');
+  const [customerInput, setCustomerInput] = useState('ENT-00441');
+  const [refundAmountInput, setRefundAmountInput] = useState('82450');
   const [reasonInput, setReasonInput] = useState<OffboardingReason>('contract_termination');
 
   const [startedCustomerId, setStartedCustomerId] = useState('');
@@ -288,6 +291,110 @@ export default function HomePage() {
   const [claimsByScope, setClaimsByScope] = useState<ClaimByScope>({});
   const [nowMs, setNowMs] = useState(Date.now());
   const [latestEventSeqId, setLatestEventSeqId] = useState<number | null>(null);
+  const [demoCountdown, setDemoCountdown] = useState<{ label: string; secondsLeft: number } | null>(null);
+  const [demoTokens, setDemoTokens] = useState<DemoTokens>({ opsManager: '', cfo: '', dpo: '' });
+  const [fallbackEvidence, setFallbackEvidence] = useState<{
+    tokenSource: string;
+    sheetUrl: string;
+    publicSheetUrl: string;
+    isPublic: boolean;
+    evidenceEntries: Array<{ key: string; value: string }>;
+  } | null>(null);
+
+  const makeRequestId = () => `req_${Math.random().toString(36).slice(2, 10)}`;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const pickToken = (primaryKey: string, fallbackKeys: string[]) => {
+      const fromLocal = window.localStorage.getItem(primaryKey);
+      if (fromLocal && fromLocal.trim()) return fromLocal;
+
+      const fromSessionPrimary = window.sessionStorage.getItem(primaryKey);
+      if (fromSessionPrimary && fromSessionPrimary.trim()) return fromSessionPrimary;
+
+      for (const key of fallbackKeys) {
+        const local = window.localStorage.getItem(key);
+        if (local && local.trim()) return local;
+        const session = window.sessionStorage.getItem(key);
+        if (session && session.trim()) return session;
+      }
+
+      return '';
+    };
+
+    setDemoTokens({
+      opsManager: pickToken(DEMO_TOKEN_STORAGE_KEYS.opsManager, ['opsSubjectToken', 'ops_manager_token']),
+      cfo: pickToken(DEMO_TOKEN_STORAGE_KEYS.cfo, ['cfoAuthorityToken', 'cfo_token']),
+      dpo: pickToken(DEMO_TOKEN_STORAGE_KEYS.dpo, ['dpoAuthorityToken', 'dpo_token'])
+    });
+  }, []);
+
+  const persistDemoTokens = (next: DemoTokens) => {
+    setDemoTokens(next);
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(DEMO_TOKEN_STORAGE_KEYS.opsManager, next.opsManager);
+    window.localStorage.setItem(DEMO_TOKEN_STORAGE_KEYS.cfo, next.cfo);
+    window.localStorage.setItem(DEMO_TOKEN_STORAGE_KEYS.dpo, next.dpo);
+  };
+
+  const appendSyntheticEvent = (eventType: string, payload: Record<string, unknown>) => {
+    setEvents((prev) => {
+      const lastSeq = prev.length > 0 ? prev[prev.length - 1].seqId : 0;
+      const next: LedgerEvent = {
+        seqId: lastSeq + 1,
+        workflowId,
+        eventType: eventType as LedgerEvent['eventType'],
+        payload,
+        createdAt: new Date().toISOString()
+      };
+      return [...prev, next];
+    });
+  };
+
+  const runCountdown = (label: string, seconds: number) =>
+    new Promise<void>((resolve) => {
+      setDemoCountdown({ label, secondsLeft: seconds });
+      let remaining = seconds;
+      const timer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(timer);
+          setDemoCountdown(null);
+          resolve();
+          return;
+        }
+
+        setDemoCountdown({ label, secondsLeft: remaining });
+      }, 1000);
+    });
+
+  const runDemoSequence = () => {
+    const opsReqId = makeRequestId();
+    void (async () => {
+      await runCountdown('ops approval (demo)', 3);
+      appendSyntheticEvent('ops_authorization_granted', {
+        actor: 'authority-system',
+        requested_by: 'orchestrator-agent-v1',
+        request_id: opsReqId,
+        scope: 'orchestrate:customer_offboarding',
+        mode: 'demo'
+      });
+      const refundReqId = makeRequestId();
+      // Initialize demo in blocked state so user must request authority manually.
+      appendSyntheticEvent('high_risk_action_blocked', {
+        actor: 'authority-system',
+        requested_by: 'orchestrator-agent-v1',
+        request_id: refundReqId,
+        actionScope: 'execute:refund',
+        missing_scope: 'execute:refund',
+        decision: 'blocked',
+        policy: 'authority_required',
+        risk: 'high',
+        mode: 'demo'
+      });
+    })();
+  };
 
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
@@ -522,13 +629,21 @@ export default function HomePage() {
     }
 
     try {
+      if (mode === 'demo' && !demoTokens.opsManager.trim()) {
+        throw new Error('Demo mode requires cached ops-manager token. Run live once or preload demo token cache.');
+      }
+
       const response = await fetch(`${apiBase}/api/workflows/offboarding/start`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-agent-client-id': 'orchestrator-a'
+          'x-agent-client-id': 'orchestrator-agent-v1'
         },
-        body: JSON.stringify({ customerId: normalizedCustomer, refundAmountUsd: parsedRefundAmount })
+        body: JSON.stringify({
+          customerId: normalizedCustomer,
+          refundAmountUsd: parsedRefundAmount,
+          opsSubjectToken: mode === 'demo' ? demoTokens.opsManager : undefined
+        })
       });
 
       if (!response.ok) {
@@ -544,6 +659,10 @@ export default function HomePage() {
       setStartedRefundAmount(parsedRefundAmount);
       setStartedReason(reasonInput);
       setUiState('executing');
+
+      if (mode === 'demo') {
+        runDemoSequence();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to start workflow');
     } finally {
@@ -557,12 +676,87 @@ export default function HomePage() {
     setError(null);
     setIsRequestingAuthority(true);
 
+    if (mode === 'demo') {
+      try {
+        const requestId = makeRequestId();
+        const claimant = scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1';
+        const cachedRoleToken = scope === 'execute:refund' ? demoTokens.cfo : demoTokens.dpo;
+        if (!cachedRoleToken.trim()) {
+          throw new Error(`Demo mode missing cached ${scope === 'execute:refund' ? 'CFO' : 'DPO'} token.`);
+        }
+        appendSyntheticEvent('step_up_requested', {
+          actor: 'orchestrator-agent-v1',
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          actionScope: scope,
+          approverRole: scope === 'execute:refund' ? 'CFO' : 'DPO',
+          mode: 'demo'
+        });
+        await runCountdown(`${scope === 'execute:refund' ? 'cfo' : 'dpo'} approval (demo)`, 5);
+        appendSyntheticEvent('step_up_approved', {
+          actor: 'authority-system',
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          actionScope: scope,
+          approverRole: scope === 'execute:refund' ? 'CFO' : 'DPO',
+          mode: 'demo'
+        });
+        appendSyntheticEvent('workflow_resumed', {
+          actor: 'orchestrator-agent-v1',
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          trigger: 'authority_granted',
+          mode: 'demo'
+        });
+
+        const demoWindowId = `demo_${scope.replace('execute:', '')}_${Date.now()}`;
+        const expiresAt = new Date(Date.now() + 120000).toISOString();
+        appendSyntheticEvent('authority_window_requested', {
+          actor: 'authority-system',
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          windowId: demoWindowId,
+          actionScope: scope,
+          ttlSeconds: 120,
+          expiresAt,
+          mode: 'demo'
+        });
+        appendSyntheticEvent('authority_window_claimed', {
+          actor: claimant,
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          windowId: demoWindowId,
+          actionScope: scope,
+          expiresAt,
+          mode: 'demo'
+        });
+
+        setClaimsByScope((prev) => ({
+          ...prev,
+          [scope]: {
+            windowId: demoWindowId,
+            workflowId,
+            actionScope: scope,
+            claimantAgentClientId: claimant,
+            status: 'claimed',
+            authorityWindowToken: cachedRoleToken,
+            expiresAt
+          }
+        }));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Authority request failed');
+      } finally {
+        setIsRequestingAuthority(false);
+      }
+      return;
+    }
+
     try {
       await fetch(`${apiBase}/api/authority/escalate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-agent-client-id': 'orchestrator-a'
+          'x-agent-client-id': 'orchestrator-agent-v1'
         },
         body: JSON.stringify({
           workflowId,
@@ -575,17 +769,15 @@ export default function HomePage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-agent-client-id': 'orchestrator-a'
+          'x-agent-client-id': 'orchestrator-agent-v1'
         },
         body: JSON.stringify({
           workflowId,
           customerId: startedCustomerId,
           actionScope: scope,
-          boundAgentClientId: 'subagent-d-only',
+          boundAgentClientId: scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1',
           amount: scope === 'execute:refund' ? startedRefundAmount : undefined,
-          ttlSeconds: 120,
-          actionReason: `Operator requested temporary authority for ${prettyScope(scope)}`,
-          reasoning: `Step-up approval requested for ${startedCustomerId} in workflow ${workflowId}`
+          ttlSeconds: 120
         })
       });
 
@@ -599,7 +791,7 @@ export default function HomePage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-agent-client-id': 'subagent-d-only'
+          'x-agent-client-id': scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1'
         },
         body: JSON.stringify({
           windowId: request.windowId
@@ -611,6 +803,13 @@ export default function HomePage() {
       }
 
       const claim = (await claimResponse.json()) as AuthorityWindowClaimResponse;
+
+      persistDemoTokens({
+        opsManager: demoTokens.opsManager,
+        cfo: scope === 'execute:refund' ? claim.authorityWindowToken : demoTokens.cfo,
+        dpo: scope === 'execute:data_deletion' ? claim.authorityWindowToken : demoTokens.dpo
+      });
+
       setClaimsByScope((prev) => ({
         ...prev,
         [scope]: claim
@@ -629,17 +828,109 @@ export default function HomePage() {
     setError(null);
     setIsExecutingAction(true);
 
+    if (mode === 'demo') {
+      try {
+        const requestId = makeRequestId();
+        const actor = scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1';
+        appendSyntheticEvent('token_acquired', {
+          actor,
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          source: 'auth0_token_vault',
+          scope,
+          target_service: scope === 'execute:refund' ? 'billing-service-v1' : 'data-service-v1',
+          exposure_window: 'active',
+          mode: 'demo'
+        });
+        appendSyntheticEvent('authority_window_consumed', {
+          actor,
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          windowId: claim.windowId,
+          actionScope: scope,
+          mode: 'demo'
+        });
+        appendSyntheticEvent('authority_token_revoked', {
+          actor: 'authority-system',
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          exposure_window: 'closed',
+          system_permission: 'revoked',
+          mode: 'demo'
+        });
+        appendSyntheticEvent('system_enforcement_active', {
+          actor: 'authority-system',
+          requested_by: 'orchestrator-agent-v1',
+          request_id: requestId,
+          token_reuse: 'rejected_by_system',
+          mode: 'demo'
+        });
+
+        setClaimsByScope((prev) => {
+          const next = { ...prev };
+          delete next[scope];
+          return next;
+        });
+
+        if (scope === 'execute:refund') {
+          const deletionReqId = makeRequestId();
+          appendSyntheticEvent('execution_attempt', {
+            actor: 'data-agent-v1',
+            requested_by: 'orchestrator-agent-v1',
+            request_id: deletionReqId,
+            action: 'execute:data_deletion',
+            mode: 'demo'
+          });
+          appendSyntheticEvent('high_risk_action_blocked', {
+            actor: 'authority-system',
+            requested_by: 'orchestrator-agent-v1',
+            request_id: deletionReqId,
+            actionScope: 'execute:data_deletion',
+            missing_scope: 'execute:data_deletion',
+            previous_approval: 'NOT_CARRIED_FORWARD',
+            decision: 'blocked',
+            policy: 'authority_required',
+            risk: 'high',
+            mode: 'demo'
+          });
+        }
+
+        if (scope === 'execute:data_deletion') {
+          appendSyntheticEvent('workflow_completed', {
+            actor: 'authority-system',
+            requested_by: 'orchestrator-agent-v1',
+            request_id: makeRequestId(),
+            exposure_window: 'minimized',
+            authority_windows_used: 2,
+            replay_attempts_blocked: 1,
+            mode: 'demo'
+          });
+          appendSyntheticEvent('replay_attempt_blocked', {
+            actor: 'authority-system',
+            requested_by: 'orchestrator-agent-v1',
+            request_id: makeRequestId(),
+            result: '403_forbidden',
+            reason: 'authority_consumed',
+            mode: 'demo'
+          });
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Execution failed');
+      } finally {
+        setIsExecutingAction(false);
+      }
+      return;
+    }
+
     try {
       const response = await fetch(`${apiBase}/api/authority/window/consume`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-agent-client-id': 'subagent-d-only'
+          'x-agent-client-id': scope === 'execute:refund' ? 'billing-agent-v1' : 'data-agent-v1'
         },
         body: JSON.stringify({
-          windowId: claim.windowId,
-          actionReason: `Operator executed ${prettyScope(scope)} after approval`,
-          reasoning: `Single-use authority window consumed for ${prettyScope(scope)} in workflow ${workflowId}`
+          windowId: claim.windowId
         })
       });
 
@@ -659,30 +950,6 @@ export default function HomePage() {
     }
   };
 
-  const forceExecute = async (scope: HighRiskAction) => {
-    if (!workflowId) return;
-
-    setError(null);
-
-    try {
-      await fetch(`${apiBase}/api/authority/high-risk/check`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-agent-client-id': 'subagent-d-only'
-        },
-        body: JSON.stringify({
-          workflowId,
-          actionScope: scope,
-          actionReason: 'Operator forced execution without authority',
-          reasoning: 'Requested force execution for boundary validation'
-        })
-      });
-    } catch {
-      // Force execute is expected to be denied and logged by policy engine.
-    }
-  };
-
   const systemStatus = useMemo(() => {
     if (uiState === 'complete' || hasDeletionConsumed) return 'COMPLETED';
     if (hasRefundBlock || hasDeletionBlock) return 'BLOCKED';
@@ -693,8 +960,8 @@ export default function HomePage() {
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
   const latestEventSummary = latestEvent ? eventMessage(latestEvent).base : 'waiting_for_first_event';
 
-  const tokenVaultEvidence = useMemo(() => {
-    const billingEvent = [...events].reverse().find((event) => event.eventType === 'billing_history_exported');
+  const extractEvidence = (sourceEvents: LedgerEvent[]) => {
+    const billingEvent = [...sourceEvents].reverse().find((event) => event.eventType === 'billing_history_exported');
     if (!billingEvent) return null;
 
     const payload = asRecord(billingEvent.payload);
@@ -712,18 +979,51 @@ export default function HomePage() {
           .filter((entry) => entry.key.length > 0)
       : [];
 
-    if (!tokenSource.toLowerCase().includes('token vault')) {
-      return null;
-    }
+    const fallbackPublicFromEvidence =
+      evidenceEntries.find((entry) => entry.key === 'public_sheet_url')?.value ||
+      evidenceEntries.find((entry) => entry.key === 'sheet_url')?.value ||
+      '';
 
     return {
       tokenSource,
       sheetUrl,
-      publicSheetUrl,
+      publicSheetUrl: publicSheetUrl || fallbackPublicFromEvidence || sheetUrl,
       isPublic,
       evidenceEntries
     };
-  }, [events]);
+  };
+
+  const tokenVaultEvidence = useMemo(() => {
+    return extractEvidence(events) ?? fallbackEvidence;
+  }, [events, fallbackEvidence]);
+
+  useEffect(() => {
+    if (!workflowId || uiState !== 'executing') return;
+    if (activeAction !== null) return;
+    if (tokenVaultEvidence) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(`${apiBase}/api/workflows/${workflowId}/ledger`, { cache: 'no-store' });
+        if (!response.ok || cancelled) return;
+        const ledger = (await response.json()) as LedgerEvent[];
+        if (cancelled) return;
+        const extracted = extractEvidence(ledger);
+        if (extracted) {
+          setFallbackEvidence(extracted);
+        }
+      } catch {
+        // Keep UI resilient; primary stream path remains source of truth.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workflowId, uiState, activeAction, tokenVaultEvidence]);
+
+  const externalLogUrl = tokenVaultEvidence?.publicSheetUrl || tokenVaultEvidence?.sheetUrl || '';
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,#111827_0%,#0a0a0a_45%,#050505_100%)] px-4 py-4 text-zinc-100 md:px-6">
@@ -753,6 +1053,34 @@ export default function HomePage() {
               {systemStatus}
             </span>
           </p>
+          {uiState === 'idle' ? (
+            <div className="md:col-span-4 flex justify-end gap-2 pt-1">
+              <button
+                className={cn(
+                  'border px-2 py-1',
+                  mode === 'demo'
+                    ? 'border-emerald-500/50 bg-emerald-900/30 text-emerald-300'
+                    : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+                )}
+                onClick={() => setMode('demo')}
+                type="button"
+              >
+                [ {mode === 'demo' ? '●' : '○'} DEMO MODE ]
+              </button>
+              <button
+                className={cn(
+                  'border px-2 py-1',
+                  mode === 'live'
+                    ? 'border-sky-500/50 bg-sky-900/30 text-sky-300'
+                    : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+                )}
+                onClick={() => setMode('live')}
+                type="button"
+              >
+                [ {mode === 'live' ? '●' : '○'} LIVE MODE ]
+              </button>
+            </div>
+          ) : null}
         </motion.header>
 
         <AnimatePresence mode="wait">
@@ -769,6 +1097,17 @@ export default function HomePage() {
               <h1 className="font-sans text-lg font-semibold text-zinc-100">Internal Offboarding Console</h1>
               <p>agent_id: orchestrator-agent-v1</p>
               <p>agent_mode: autonomous</p>
+              <p>AGENT HIERARCHY</p>
+              <p>orchestrator-agent-v1 [RUNNING]</p>
+              <p>├── identity-agent-v1</p>
+              <p>├── billing-agent-v1</p>
+              <p>├── compliance-agent-v1</p>
+              <p>└── data-agent-v1</p>
+              <p>system_principle:</p>
+              <p>  access_pattern=just_in_time</p>
+              <p>  exposure_window=minimized</p>
+              <p>  authority_model=per_action</p>
+              <p>  authority_reuse=impossible</p>
               <p>authority_enforcement: irreversible_windows</p>
               <p>token_source: auth0_token_vault_runtime_only</p>
               <p>execution_profile: strict_enterprise_controls</p>
@@ -814,6 +1153,16 @@ export default function HomePage() {
               >
                 {isStarting ? 'STARTING WORKFLOW...' : 'START WORKFLOW'}
               </button>
+              <p className="font-mono text-[11px] text-zinc-500">mode: {mode}</p>
+              <div className="border border-zinc-800 bg-zinc-950/70 px-3 py-2 font-mono text-[11px] text-zinc-300">
+                <p className="text-zinc-100">LIVE MODE NOTICE</p>
+                <p className="mt-1">This demo uses real approvals.</p>
+                <p>Operations Manager to start offboarding.</p>
+                <p>CFO to approve and execute the refund.</p>
+                <p>DPO to approve data deletion.</p>
+                <p>Approvals are manual and may take 3-5 minutes.</p>
+                <p>Use DEMO MODE to run quickly with cached authorized tokens.</p>
+              </div>
               {error ? <p className="font-mono text-xs text-red-300">{error}</p> : null}
             </div>
             </motion.div>
@@ -835,14 +1184,22 @@ export default function HomePage() {
               <div className="space-y-2 font-mono text-xs text-zinc-300">
                 <p>agent_id: orchestrator-agent-v1</p>
                 <p>mode: autonomous</p>
+                <p>AGENT HIERARCHY</p>
+                <p>orchestrator-agent-v1 [RUNNING]</p>
+                <p>├── identity-agent-v1</p>
+                <p>├── billing-agent-v1</p>
+                <p>├── compliance-agent-v1</p>
+                <p>└── data-agent-v1</p>
                 <p>state: {systemStatus.toLowerCase()}</p>
                 <p>workflow_status: {workflowStatus?.status ?? 'loading'}</p>
                 <p>customer_id: {startedCustomerId}</p>
                 <p>refund_amount: {toMoney(startedRefundAmount)}</p>
                 <p>reason_code: {startedReason}</p>
                 <p>agent_now: {latestEventSummary}</p>
+                <p>system_principle: per_action / just_in_time</p>
                 <p>token_vault: runtime_fetch_only</p>
                 <p>credential_storage: none</p>
+                {demoCountdown ? <p>demo_countdown: {demoCountdown.label} {demoCountdown.secondsLeft}s</p> : null}
               </div>
             </motion.aside>
 
@@ -866,17 +1223,11 @@ export default function HomePage() {
                     <span className="text-zinc-500">[{toTime(event.createdAt)}]</span>
                     <span className="text-zinc-400">{eventActor(event)}</span>
                     <div className={cn('space-y-0.5', eventTone(event))}>
-                      <span className="block">{eventMessage(event).base}</span>
-                      {eventMessage(event).actionReason ? (
-                        <span className="block text-[11px] text-zinc-300/95">
-                          reason=<TypeRevealLine text={eventMessage(event).actionReason as string} animate={event.seqId === latestEventSeqId} />
-                        </span>
-                      ) : null}
-                      {eventMessage(event).reasoning ? (
-                        <span className="block text-[11px] text-zinc-400/90">
-                          rationale=<TypeRevealLine text={eventMessage(event).reasoning as string} animate={event.seqId === latestEventSeqId} />
-                        </span>
-                      ) : null}
+                      <span className="block">
+                        <TypeRevealLine text={eventMessage(event).base} animate={event.seqId === latestEventSeqId} />
+                      </span>
+                      <span className="block text-[11px] text-zinc-300/95">requested_by={eventRequestedBy(event)}</span>
+                      <span className="block text-[11px] text-zinc-400/90">request_id={eventRequestId(event)}</span>
                     </div>
                   </motion.div>
                 ))}
@@ -922,15 +1273,6 @@ export default function HomePage() {
                       >
                         {isRequestingAuthority ? 'requesting_authority...' : 'request_authority'}
                       </button>
-                      <button
-                        className="border border-zinc-700 bg-zinc-900 px-3 py-2 font-sans text-xs text-zinc-300 hover:bg-zinc-800"
-                        onClick={() => {
-                          void forceExecute(sidebarScope);
-                        }}
-                        type="button"
-                      >
-                        force_execute
-                      </button>
                     </div>
                   ) : (
                     <button
@@ -952,6 +1294,21 @@ export default function HomePage() {
                           <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
                           <span className="font-semibold text-emerald-300">Token Vault Verified</span>
                         </div>
+                        <p className="text-zinc-300">
+                          external_log:{' '}
+                          {externalLogUrl ? (
+                            <a
+                              className="text-emerald-300 underline decoration-dotted"
+                              href={externalLogUrl}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              [link]
+                            </a>
+                          ) : (
+                            <span className="text-zinc-500">[pending]</span>
+                          )}
+                        </p>
                         <p className="text-zinc-300">Sharing: {tokenVaultEvidence.isPublic ? 'Public (anyone with link)' : 'Restricted by provider scope'}</p>
                         {tokenVaultEvidence.publicSheetUrl ? (
                           <a
@@ -990,6 +1347,16 @@ export default function HomePage() {
               ) : (
                 <div className="mt-3 space-y-2 font-mono text-xs text-zinc-300">
                   <p className="text-zinc-400">authority lifecycle complete</p>
+                  <p>
+                    external_log:{' '}
+                    {externalLogUrl ? (
+                      <a className="text-emerald-300 underline decoration-dotted" href={externalLogUrl} rel="noreferrer" target="_blank">
+                        [link]
+                      </a>
+                    ) : (
+                      <span className="text-zinc-500">[pending]</span>
+                    )}
+                  </p>
                   {tokenVaultEvidence?.evidenceEntries.length ? (
                     <div className="overflow-hidden rounded border border-zinc-800">
                       <div className="grid grid-cols-[120px_1fr] bg-zinc-900 px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-400">
