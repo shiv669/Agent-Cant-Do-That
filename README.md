@@ -192,8 +192,8 @@ Create `.env` in repository root from `.env.example`.
 
 The current system expects these groups:
 
-- Core runtime: `PORT`, `NODE_ENV`, `DATABASE_URL`, `REDIS_URL`, `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`
-- Console + Auth0 session: `APP_BASE_URL`, `AUTH0_SECRET`, `NEXT_PUBLIC_API_URL`
+- Core runtime: `PORT`, `NODE_ENV`, `DATABASE_URL`, `REDIS_URL`, `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `API_BASE_URL`
+- Console + Auth0 session: `APP_BASE_URL`, `AUTH0_SECRET`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_DEMO_MODE_ENABLED`
 - Auth0 core and My Account: `AUTH0_DOMAIN`, `AUTH0_AUDIENCE`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET`, `AUTH0_MY_ACCOUNT_AUDIENCE`
 - CIBA and custom API clients: `AUTH0_CIBA_CLIENT_ID`, `AUTH0_CIBA_CLIENT_SECRET`, `AUTH0_CIBA_AUDIENCE`, `AUTH0_CUSTOM_API_CLIENT_ID`, `AUTH0_CUSTOM_API_CLIENT_SECRET`
 - Token Vault exchange: `AUTH0_TOKEN_VAULT_CLIENT_ID`, `AUTH0_TOKEN_VAULT_CLIENT_SECRET`, `AUTH0_CONNECTION_NAME`, `AUTH0_TOKEN_VAULT_REQUESTED_TOKEN_TYPE`
@@ -212,6 +212,32 @@ Demo mode notes:
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:4001
 ```
+
+Audience consistency note:
+
+- `AUTH0_AUDIENCE` and `AUTH0_CIBA_AUDIENCE` should match the Auth0 API identifier provisioned by `tools/auth0/setup.mjs`.
+- Default identifier used by this repo: `https://agentcantdothat.api`
+
+### 3.1 Auth0 Dashboard + Guardian step-up checklist
+
+If you are configuring Auth0 manually (without `npm run setup:auth0`), verify these dashboard settings:
+
+1. Applications:
+	- Create/register `acdt-console` (Regular Web App), `acdt-api` (M2M), `acdt-worker` (M2M).
+2. APIs:
+	- Create API identifier `https://agentcantdothat.api`.
+	- Add scopes: `orchestrate:customer_offboarding`, `execute:refund`, `execute:data_deletion`.
+3. Roles:
+	- Create roles: `operations_manager`, `cfo`, `dpo`.
+	- Assign approver users to role-appropriate identities used by `OPS_USER_ID`, `CFO_USER_ID`, `DPO_USER_ID`.
+4. MFA / Guardian:
+	- Enable Guardian push / OTP for approver users.
+	- Ensure step-up users can complete MFA on a separate device.
+5. CIBA + Token Vault clients:
+	- Configure client credentials for `AUTH0_CIBA_CLIENT_ID/SECRET` and `AUTH0_TOKEN_VAULT_CLIENT_ID/SECRET`.
+	- Ensure these clients can request the configured audience and required scopes.
+6. Validation:
+	- Run bootstrap/status commands from section `7.1` and confirm all roles show as initialized.
 
 ### 4. Start infrastructure
 

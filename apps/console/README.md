@@ -36,6 +36,7 @@ Required:
 - `AUTH0_AUDIENCE`
 
 Optional:
+- `NEXT_PUBLIC_DEMO_MODE_ENABLED` (defaults to `false`)
 - `AUTH0_MY_ACCOUNT_AUDIENCE` (defaults to `https://<AUTH0_DOMAIN>/me/`)
 
 ## Runtime behavior

@@ -4,7 +4,7 @@ This folder contains an idempotent setup script to create/update the required Au
 
 ## What it provisions
 
-- Resource server (API): `https://agentcantdothat/api`
+- Resource server (API): `https://agentcantdothat.api`
 - API scopes:
   - `orchestrate:customer_offboarding`
   - `execute:refund`

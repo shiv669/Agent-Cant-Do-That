@@ -1,5 +1,16 @@
-Color Schema
+# Design Notes (Legacy Reference)
 
+This file is intentionally kept as an early visual reference and is **not** the source of truth for the current console implementation.
+
+Current source of truth:
+
+- Product intent and behavior: `PRD.md`
+- Architecture/security constraints: `ADR.md`
+- Runtime UX implementation: `apps/console/app/page.tsx`
+
+Historical reference tokens (legacy):
+
+```json
 {
   "primary": "#0F172A",
   "background": "#F8FAFC",
@@ -9,12 +20,9 @@ Color Schema
   "success": "#16A34A",
   "warning": "#D97706"
 }
+```
 
-
----
-
-Typography
-
+```json
 {
   "font_family": "Inter",
   "weights": {
@@ -29,3 +37,4 @@ Typography
     "small": "12-13px"
   }
 }
+```

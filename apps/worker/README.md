@@ -23,3 +23,4 @@ Read from root `.env`:
 
 - `TEMPORAL_ADDRESS` (default `localhost:7233`)
 - `TEMPORAL_NAMESPACE` (default `default`)
+- `API_BASE_URL` (default `http://localhost:4001`)

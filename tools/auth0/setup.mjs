@@ -23,7 +23,7 @@ if (!bootstrapClientId || !bootstrapClientSecret) {
 const domain = process.env.AUTH0_DOMAIN;
 
 const audience = `https://${domain}/api/v2/`;
-const apiIdentifier = 'https://agentcantdothat/api';
+const apiIdentifier = 'https://agentcantdothat.api';
 
 const scopes = [
   { value: 'orchestrate:customer_offboarding', description: 'Orchestrate customer offboarding workflow' },
