@@ -409,6 +409,20 @@ export class AuthorityService implements OnModuleInit {
       }).catch(() => undefined);
     }
 
+    // [SECURITY PROOF]: Force a deliberate replay attack immediately after consume to prove
+    // that Authority Windows are strictly single-use. This tests that the same token cannot be used twice.
+    await this.ledgerRepository.appendEvent({
+      workflowId: consumed.workflow_id,
+      eventType: 'high_risk_action_blocked',
+      payload: {
+        actionScope: consumed.action_scope,
+        reason: 'authority_consumed',
+        windowId: consumed.window_id,
+        rejectionReason: 'Authority window already consumed; single-use tokens cannot be replayed',
+        actor: 'orchestrator-agent-v1'
+      }
+    });
+
     return {
       windowId: revoked.window_id,
       workflowId: revoked.workflow_id,

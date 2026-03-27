@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import type {
   AuthorityWindowClaimResponse,
@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4001';
 const POLL_INTERVAL_MS = 1000;
-const LIVE_AUTO_EXECUTE_DELAY_MS = 8000;
+const ACTION_EXECUTE_DELAY_MS = 8000;
 
 type UIState = 'idle' | 'executing' | 'complete';
 type HighRiskAction = 'execute:refund' | 'execute:data_deletion';
@@ -145,14 +145,20 @@ function eventMessage(event: LedgerEvent): EventMessage {
 
   if (event.eventType === 'high_risk_action_blocked') {
     const scope = String(payload.actionScope ?? '');
+    const reason = String(payload.reason ?? 'missing_scope');
+    if (reason === 'authority_consumed') {
+      return {
+        base: `replay_attempt_blocked action=${scope} (token already consumed)`
+      };
+    }
     if (scope === 'execute:refund') {
       return {
-        base: 'system.response 403 forbidden missing_scope=execute:refund'
+        base: `agent_intent:execute(refund) | system_enforcement:403_forbidden(missing_scope:execute:refund)`
       };
     }
     if (scope === 'execute:data_deletion') {
       return {
-        base: 'system.response 403 forbidden missing_scope=execute:data_deletion'
+        base: `agent_intent:execute(deletion) | system_enforcement:403_forbidden(missing_scope:execute:data_deletion)`
       };
     }
   }
@@ -331,6 +337,7 @@ export default function HomePage() {
     isPublic: boolean;
     evidenceEntries: Array<{ key: string; value: string }>;
   } | null>(null);
+  const feedContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
@@ -755,9 +762,9 @@ export default function HomePage() {
   }, [events, hasDeletionConsumed, hasRefundConsumed]);
 
   const interceptScope = latestBlocked?.scope ?? sidebarScope;
-  const shouldShowConsentPanel = Boolean(
+  const interceptApprover = interceptScope === 'execute:refund' ? 'CFO' : interceptScope === 'execute:data_deletion' ? 'DPO' : 'N/A';
+  const isInterceptActive = Boolean(
     interceptScope &&
-      mode === 'demo' &&
       !isWorkflowComplete &&
       !sidebarClaim &&
       nowMs >= popupCooldownUntil &&
@@ -773,34 +780,33 @@ export default function HomePage() {
       ? 'text-amber-300 border-amber-500/70 bg-amber-950/30'
       : 'text-zinc-100 border-zinc-600 bg-zinc-900';
 
-  const tokenLifecyclePhase = useMemo(() => {
-    if (!sidebarScope) return 0;
+  const tokenLifecycleByScope = useMemo<Record<HighRiskAction, number>>(() => {
+    const scopePhase = (scope: HighRiskAction) => {
+      const wasConsumed = events.some((event) => {
+        if (event.eventType !== 'authority_window_consumed') return false;
+        const payload = asRecord(event.payload);
+        return payload.actionScope === scope;
+      });
 
-    const wasRevoked = events.some((event) => {
-      if (event.eventType !== 'authority_token_revoked') return false;
-      const payload = asRecord(event.payload);
-      return payload.actionScope === sidebarScope;
-    });
+      if (wasConsumed) return 3;
 
-    if (wasRevoked) return 4;
+      const hasClaim = Boolean(claimsByScope[scope]);
+      if (hasClaim) return 2;
 
-    const wasConsumed = events.some((event) => {
-      if (event.eventType !== 'authority_window_consumed') return false;
-      const payload = asRecord(event.payload);
-      return payload.actionScope === sidebarScope;
-    });
+      const wasMinted = events.some((event) => {
+        if (event.eventType !== 'authority_window_issued') return false;
+        const payload = asRecord(event.payload);
+        return payload.actionScope === scope;
+      });
 
-    if (wasConsumed) return 3;
-    if (sidebarClaim) return 2;
+      return wasMinted ? 1 : 0;
+    };
 
-    const wasMinted = events.some((event) => {
-      if (event.eventType !== 'authority_window_issued') return false;
-      const payload = asRecord(event.payload);
-      return payload.actionScope === sidebarScope;
-    });
-
-    return wasMinted ? 1 : 0;
-  }, [events, sidebarClaim, sidebarScope]);
+    return {
+      'execute:refund': scopePhase('execute:refund'),
+      'execute:data_deletion': scopePhase('execute:data_deletion')
+    };
+  }, [claimsByScope, events]);
 
   useEffect(() => {
     setClaimsByScope((prev) => {
@@ -848,18 +854,15 @@ export default function HomePage() {
       const claim = await requestTemporaryAuthority(latestBlocked.scope);
       if (!claim) return;
       setPendingExecuteScope(latestBlocked.scope);
-      const executeAt = Date.now() + LIVE_AUTO_EXECUTE_DELAY_MS;
-      setPendingExecuteUntilMs(executeAt);
-      await new Promise((resolve) => setTimeout(resolve, LIVE_AUTO_EXECUTE_DELAY_MS));
+      setPendingExecuteUntilMs(Date.now() + ACTION_EXECUTE_DELAY_MS);
+      await new Promise((resolve) => setTimeout(resolve, ACTION_EXECUTE_DELAY_MS));
       await executeAction(latestBlocked.scope, claim);
     })();
   }, [
     mode,
     uiState,
     latestBlocked,
-    lastAutoHandledBlockSeq,
-    isRequestingAuthority,
-    isExecutingAction
+    lastAutoHandledBlockSeq
   ]);
 
   const extractEvidence = (sourceEvents: LedgerEvent[]) => {
@@ -942,11 +945,18 @@ export default function HomePage() {
     };
   }, [workflowId, uiState, activeAction, tokenVaultEvidence]);
 
+  useEffect(() => {
+    if (uiState !== 'executing') return;
+    const node = feedContainerRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [events, uiState]);
+
   const externalLogUrl = tokenVaultEvidence?.publicSheetUrl || tokenVaultEvidence?.sheetUrl || '';
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,#111827_0%,#0a0a0a_45%,#050505_100%)] px-4 py-4 text-zinc-100 md:px-6">
-      <section className="mx-auto max-w-[1560px]">
+    <main className="h-screen w-screen overflow-hidden bg-[radial-gradient(circle_at_top,#111827_0%,#0a0a0a_45%,#050505_100%)] text-zinc-100">
+      <section className="mx-auto flex h-full w-full max-w-[1700px] flex-col px-4 py-3 md:px-5">
         {approvalToast ? (
           <div className="mb-3 border border-rose-600 bg-rose-950/70 px-3 py-2 font-mono text-xs text-rose-100">
             approval_error: {approvalToast}
@@ -1004,7 +1014,7 @@ export default function HomePage() {
         ) : null}
 
         <motion.header
-          className="mb-4 grid gap-2 border border-zinc-800/90 bg-zinc-900/90 px-4 py-3 font-mono text-xs backdrop-blur-sm md:grid-cols-4"
+          className="mb-3 grid min-h-[68px] gap-1 border border-zinc-800/90 bg-zinc-900/90 px-4 py-2 font-mono text-xs backdrop-blur-sm md:grid-cols-4"
           variants={cardReveal}
           initial="hidden"
           animate="visible"
@@ -1029,48 +1039,49 @@ export default function HomePage() {
               {systemStatus}
             </span>
           </p>
-          {uiState === 'idle' ? (
-            <div className="md:col-span-4 flex justify-end gap-2 pt-1">
-              <button
-                className={cn(
-                  'border px-2 py-1',
-                  mode === 'demo'
-                    ? 'border-emerald-500/50 bg-emerald-900/30 text-emerald-300'
-                    : 'border-zinc-700 bg-zinc-900 text-zinc-400'
-                )}
-                onClick={() => setMode('demo')}
-                type="button"
-              >
-                [ {mode === 'demo' ? '●' : '○'} DEMO MODE ]
-              </button>
-              <button
-                className={cn(
-                  'border px-2 py-1',
-                  mode === 'live'
-                    ? 'border-sky-500/50 bg-sky-900/30 text-sky-300'
-                    : 'border-zinc-700 bg-zinc-900 text-zinc-400'
-                )}
-                onClick={() => setMode('live')}
-                type="button"
-              >
-                [ {mode === 'live' ? '●' : '○'} LIVE MODE ]
-              </button>
-            </div>
-          ) : null}
         </motion.header>
+
+        {uiState === 'idle' ? (
+          <div className="mb-3 flex h-10 items-center justify-end gap-2 border border-zinc-800/90 bg-zinc-900/80 px-3">
+            <button
+              className={cn(
+                'border px-2 py-1 text-xs font-mono',
+                mode === 'demo'
+                  ? 'border-emerald-500/50 bg-emerald-900/30 text-emerald-300'
+                  : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+              )}
+              onClick={() => setMode('demo')}
+              type="button"
+            >
+              [ {mode === 'demo' ? '●' : '○'} DEMO MODE ]
+            </button>
+            <button
+              className={cn(
+                'border px-2 py-1 text-xs font-mono',
+                mode === 'live'
+                  ? 'border-sky-500/50 bg-sky-900/30 text-sky-300'
+                  : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+              )}
+              onClick={() => setMode('live')}
+              type="button"
+            >
+              [ {mode === 'live' ? '●' : '○'} LIVE MODE ]
+            </button>
+          </div>
+        ) : null}
 
         <AnimatePresence mode="wait">
           {uiState === 'idle' ? (
             <motion.div
               key="workflow-input"
-              className="grid gap-4 border border-zinc-800 bg-zinc-900/90 p-5 backdrop-blur-sm md:grid-cols-2"
+              className="grid h-[calc(84vh-52px)] min-h-0 gap-4 overflow-hidden border border-zinc-800 bg-zinc-900/90 p-5 backdrop-blur-sm md:grid-cols-2"
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
             >
             <div className="space-y-2 font-mono text-xs text-zinc-300">
-              <h1 className="font-sans text-lg font-semibold text-zinc-100">Agent Can&apos;t Do That | Zero-Trust Agent Protocol</h1>
+              <h1 className="font-sans text-lg font-semibold text-zinc-100">Agent Control Plane</h1>
               <p>agent_id: orchestrator-agent-v1</p>
               <p>agent_mode: autonomous</p>
               <p>AGENT HIERARCHY</p>
@@ -1130,12 +1141,11 @@ export default function HomePage() {
               <p className="font-mono text-[11px] text-zinc-500">mode: {mode}</p>
               <div className="border border-zinc-800 bg-zinc-950/70 px-3 py-2 font-mono text-[11px] text-zinc-300">
                 <p className="text-zinc-100">LIVE MODE NOTICE</p>
-                <p className="mt-1">This demo uses real approvals.</p>
+                <p className="mt-1">Both modes call backend APIs and stream real ledger events over SSE.</p>
                 <p>Operations Manager to start offboarding.</p>
                 <p>CFO to approve and execute the refund.</p>
                 <p>DPO to approve data deletion.</p>
-                <p>Approvals are manual and may take 3-5 minutes.</p>
-                <p>Use DEMO MODE to run quickly with cached authorized tokens.</p>
+                <p>Approvals are manual in live mode and immediate in demo mode.</p>
               </div>
               {error ? <p className="font-mono text-xs text-red-300">{error}</p> : null}
             </div>
@@ -1147,319 +1157,226 @@ export default function HomePage() {
           {uiState === 'executing' ? (
             <motion.div
               key="workflow-live"
-              className="grid gap-3"
+              className="grid h-[84vh] grid-cols-12 gap-4 overflow-hidden border border-zinc-800/90 bg-zinc-900/80 p-4"
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
             >
-              <motion.section
-                className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]"
-                variants={cardReveal}
-                initial="hidden"
-                animate="visible"
-              >
-                <div className="border border-zinc-800 bg-zinc-900/90 p-4 backdrop-blur-sm">
-                  <h2 className="mb-3 font-sans text-sm font-semibold uppercase tracking-wide text-zinc-100">Visual Workflow Map</h2>
-                  <div className="grid gap-2 text-center font-mono text-[11px] lg:grid-cols-5">
-                    {[
-                      { key: 'start', label: 'Start', done: events.length > 0, blocked: false },
-                      { key: 'revoke', label: 'Revoke SSO', done: events.some((event) => event.eventType === 'revoke_sso_access_completed'), blocked: false },
-                      {
-                        key: 'refund_gate',
-                        label: 'Refund Gate ',
-                        done: hasRefundConsumed,
-                        blocked: hasRefundBlock && !hasRefundConsumed
-                      },
-                      {
-                        key: 'deletion_gate',
-                        label: 'Deletion Gate ',
-                        done: hasDeletionConsumed,
-                        blocked: hasDeletionBlock && !hasDeletionConsumed
-                      },
-                      {
-                        key: 'evidence',
-                        label: 'Export Evidence',
-                        done: Boolean(tokenVaultEvidence?.sheetUrl || tokenVaultEvidence?.publicSheetUrl),
-                        blocked: false
-                      }
-                    ].map((node) => (
-                      <div
-                        key={node.key}
-                        className={cn(
-                          'relative border px-2 py-2',
-                          node.blocked
-                            ? 'border-rose-500 bg-rose-950/50 text-rose-200'
-                            : node.done
-                            ? 'border-emerald-500/70 bg-emerald-950/30 text-emerald-200'
-                            : 'border-zinc-700 bg-zinc-950 text-zinc-300'
-                        )}
-                      >
-                        <p className="font-semibold">{node.done ? '[✓]' : node.blocked ? '[🔒]' : '[ ]'} {node.label}</p>
-                        {node.blocked ? <p className="mt-1 text-[10px] font-bold tracking-wide">BLOCKED BY POLICY</p> : null}
-                        {node.blocked && boundaryMissingScope ? (
-                          <p className="mt-1 border border-rose-500/60 bg-rose-950 px-1 py-0.5 text-[10px] text-rose-200">
-                            missing_scope: {boundaryMissingScope}
-                          </p>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="border border-zinc-800 bg-zinc-900/90 p-4 backdrop-blur-sm">
-                  <h3 className="mb-3 font-sans text-sm font-semibold uppercase tracking-wide text-zinc-100">Policy Engine Status</h3>
+              <aside className="col-span-3 flex h-full flex-col gap-4 overflow-hidden">
+                <section className="h-1/2 overflow-hidden border border-zinc-800 bg-zinc-950/70 p-3">
+                  <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Target Context</h3>
                   <div className="space-y-2 font-mono text-xs text-zinc-300">
-                    <p>policy_model: zero_trust_irreversible_windows</p>
-                    <p>state: {systemStatus.toLowerCase()}</p>
-                    <p>workflow_status: {workflowStatus?.status ?? 'loading'}</p>
-                    <p>latest_projection: {latestEventSummary}</p>
-                    <p>request_surface: append_only_ledger_sse</p>
+                    <p>customer_id: {startedCustomerId || customerInput}</p>
+                    <p>refund_amount: {startedRefundAmount > 0 ? toMoney(startedRefundAmount) : '--'}</p>
+                    <p>risk_tier: high</p>
+                    <p>target_apis: billing, identity, retention, vault</p>
+                    <p>workflow_status: {workflowStatus?.status ?? 'running'}</p>
+                    <p>mode: {mode}</p>
                   </div>
-                </div>
-              </motion.section>
+                </section>
 
-              {shouldShowConsentPanel && interceptScope ? (
-                <div className="fixed inset-0 z-40 bg-black/45">
-                  {/* [JUDGE NOTICE - AUTONOMY & UX]: The frontend acts as a read-only observability layer to prove true agentic autonomy. The human cannot drive the workflow; they can only act as a cryptographic cryptographic key-turner when the AI is hard-blocked by the Auth0 policy engine. */}
-                  <div className="absolute right-4 top-4 w-full max-w-md border border-amber-500/70 bg-zinc-950/95 p-4 font-mono text-xs text-zinc-200 shadow-2xl">
-                    <p className="mb-3 border border-amber-700/70 bg-amber-950/25 px-2 py-2 font-bold text-amber-300">[ 🔒 SYSTEM HALTED: AUTHORIZATION REQUIRED ]</p>
-                    <div className="space-y-1">
-                      <p>Target Resource: {startedCustomerId || 'Apple_334'}</p>
-                      <p>Requested Action: {interceptScope}</p>
-                      <p>Financial Risk: {toMoney(startedRefundAmount || 76455)}</p>
-                      <p>Required Step-Up Role: {interceptScope === 'execute:refund' ? 'CFO' : 'DPO'}</p>
+                <section className="h-1/2 overflow-hidden border border-zinc-800 bg-zinc-950/70 p-3">
+                  <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Policy Ruleset</h3>
+                  <div className="space-y-2 font-mono text-xs text-zinc-300">
+                    <p>Rule 1: no refunds without execute:refund</p>
+                    <p>Rule 2: deletion requires separate execute:data_deletion</p>
+                    <p>Rule 3: authority windows are single-use</p>
+                    <p>Rule 4: replay attempts are hard-blocked</p>
+                    <p>Rule 5: all state derived from append-only ledger</p>
+                    {boundaryMissingScope ? <p className="text-rose-300">missing_scope: {boundaryMissingScope}</p> : null}
+                  </div>
+                </section>
+              </aside>
+
+              <section className="col-span-6 flex h-full flex-col gap-4 overflow-hidden">
+                <section
+                  className={cn(
+                    'h-[40%] overflow-hidden border p-2 flex flex-col',
+                    isInterceptActive ? 'border-rose-500/60 bg-rose-950/20' : 'border-zinc-800 bg-zinc-950/70'
+                  )}
+                >
+                  <div className="flex-shrink-0">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Active Intercept</h3>
+                    <p className="font-mono text-[11px] text-zinc-300">intent: {latestEventSummary}</p>
+                    <p className="font-mono text-[11px] text-zinc-500">{systemStatus.toLowerCase()}</p>
+                  </div>
+
+                  {isInterceptActive && interceptScope ? (
+                    <div className="flex-shrink-0 mt-1 border border-rose-700/60 bg-rose-950/25 px-1.5 py-1 font-mono text-[10px] text-rose-200">
+                      <p>{interceptScope} | approver={interceptApprover} | {startedReason}</p>
                     </div>
+                  ) : null}
 
-                    {mode === 'live' ? (
-                      <p className="mt-4 animate-pulse text-amber-300">
-                        ⧗ Awaiting out-of-band Auth0 Guardian approval on CFO&apos;s registered physical device...
+                  <div className="flex-1 overflow-hidden mt-1 flex flex-col justify-between">
+                    {isWorkflowComplete ? (
+                      <p className="text-center font-mono text-xs font-semibold text-emerald-300">WORKFLOW COMPLETED</p>
+                    ) : isInterceptActive && interceptScope ? (
+                      mode === 'live' ? (
+                        <p className="animate-pulse text-center font-mono text-xs text-amber-300">
+                          ⧗ Awaiting Auth0 Guardian approval...
+                        </p>
+                      ) : (
+                        <div className="w-full space-y-1">
+                          <p className="text-center font-mono text-[10px] text-rose-300">[ SYSTEM HALTED: AUTHORIZATION REQUIRED ]</p>
+                          <div className="grid grid-cols-2 gap-1">
+                            <button
+                              className="border border-emerald-500 bg-emerald-900/30 px-2 py-1 font-semibold tracking-wide text-emerald-100 hover:bg-emerald-800/40 disabled:opacity-50 text-xs"
+                              disabled={isRequestingAuthority || isExecutingAction}
+                              onClick={() => {
+                                void (async () => {
+                                  const claim = await requestTemporaryAuthority(interceptScope);
+                                  if (!claim) return;
+                                  setDismissedScope(null);
+                                  setPendingExecuteScope(interceptScope);
+                                  setPendingExecuteUntilMs(Date.now() + ACTION_EXECUTE_DELAY_MS);
+                                  await new Promise((resolve) => setTimeout(resolve, ACTION_EXECUTE_DELAY_MS));
+                                  await executeAction(interceptScope, claim);
+                                })();
+                              }}
+                              type="button"
+                            >
+                              {isRequestingAuthority || isExecutingAction ? '[ Minting... ]' : '[ APPROVE ]'}
+                            </button>
+                            <button
+                              className="border border-rose-500 bg-rose-900/30 px-2 py-1 font-semibold tracking-wide text-rose-100 hover:bg-rose-800/40 text-xs"
+                              disabled={isRequestingAuthority || isExecutingAction}
+                              onClick={() => {
+                                const reason = denyReason.trim() || 'Denied by reviewer';
+                                setDismissedScope(interceptScope);
+                                setApprovalToast(`Authority denied: ${reason}`);
+                                setError(`Authority denied: ${reason}`);
+                              }}
+                              type="button"
+                            >
+                              [ DENY ]
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    ) : sidebarScope && sidebarClaim ? (
+                      <p className={cn('text-center font-mono text-xl font-bold tracking-wide', authorityToneClass.split(' ')[0])}>
+                        {countdown(authorityExpiry, nowMs)}
                       </p>
                     ) : (
-                      <div className="mt-4 space-y-3">
-                        <div className="border border-zinc-800 bg-zinc-900/60 p-2 text-zinc-300">
-                          <p>Agent Intent: {interceptScope === 'execute:refund' ? 'Financial Closure' : 'Data Destruction Completion'}</p>
-                          <p>Action Reason: {interceptScope === 'execute:refund' ? 'Agent is executing refund per workflow policy.' : 'Agent is executing deletion after refund closure.'}</p>
-                        </div>
-
-                        <label className="block text-zinc-300">Deny Reason</label>
-                        <input
-                          className="w-full border border-zinc-700 bg-zinc-950 px-2 py-2 text-zinc-100 outline-none focus:border-zinc-500"
-                          onChange={(event) => setDenyReason(event.target.value)}
-                          value={denyReason}
-                        />
-
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            className="w-full border border-emerald-500 bg-emerald-900/30 px-3 py-2 font-semibold tracking-wide text-emerald-100 hover:bg-emerald-800/40 disabled:opacity-50"
-                            disabled={isRequestingAuthority || isExecutingAction}
-                            onClick={() => {
-                              // [JUDGE NOTICE - AUTH0 CIBA]: In this zero-friction demo environment, this button triggers the step-up approval natively. In a production rollout, clicking this halts the UI and polls while Auth0 CIBA pushes a Guardian notification to the approver's physical device.
-                              void (async () => {
-                                const claim = await requestTemporaryAuthority(interceptScope);
-                                if (!claim) return;
-                                setDismissedScope(null);
-                                setPendingExecuteScope(interceptScope);
-                                setTimeout(() => {
-                                  void executeAction(interceptScope, claim);
-                                }, 1200);
-                              })();
-                            }}
-                            type="button"
-                          >
-                            {isRequestingAuthority || isExecutingAction
-                              ? '[ Minting Token Vault Artifact... ]'
-                              : '[ APPROVE ]'}
-                          </button>
-
-                          <button
-                            className="w-full border border-rose-500 bg-rose-900/30 px-3 py-2 font-semibold tracking-wide text-rose-100 hover:bg-rose-800/40"
-                            disabled={isRequestingAuthority || isExecutingAction}
-                            onClick={() => {
-                              const reason = denyReason.trim() || 'Denied by reviewer';
-                              setDismissedScope(interceptScope);
-                              setApprovalToast(`Authority denied: ${reason}`);
-                              setError(`Authority denied: ${reason}`);
-                            }}
-                            type="button"
-                          >
-                            [ DENY ]
-                          </button>
-                        </div>
-                      </div>
+                      <p className="text-center font-mono text-[10px] text-zinc-400">Agent running under current policy envelope...</p>
                     )}
                   </div>
-                </div>
-              ) : null}
 
-              <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
-                <motion.section className="border border-zinc-800 bg-zinc-900/90 p-4 backdrop-blur-sm" variants={cardReveal} initial="hidden" animate="visible">
-                  {!isWorkflowComplete ? (
-                    <>
-                      <div className="mb-3 border border-zinc-800 bg-zinc-950/80 p-3 font-mono text-xs text-zinc-200">
-                        <p className="font-semibold text-zinc-100">OBSERVABILITY OF INTENT</p>
-                        <p className="mt-2">CURRENT STATE:</p>
-                        <p>Target Resource: customer_{startedCustomerId || 'Apple_334'}</p>
-                        <p>Agent Intent: Financial Closure</p>
-                        <p className={cn('font-semibold', systemStatus === 'BLOCKED' ? 'text-amber-300' : 'text-zinc-200')}>
-                          System Enforcement: {systemStatus === 'BLOCKED' ? 'Hard Block (Awaiting Auth0 CIBA)' : 'Policy Evaluation Active'}
-                        </p>
-                      </div>
+                  {pendingExecuteScope ? (
+                    <p className="flex-shrink-0 mt-1 font-mono text-[10px] text-sky-300">
+                      agent_execution_retry_in: {pendingExecuteUntilMs ? `${Math.max(0, Math.ceil((pendingExecuteUntilMs - nowMs) / 1000))}s` : '--'}
+                    </p>
+                  ) : null}
+                </section>
 
-                      {sidebarScope && sidebarClaim ? (
-                        <div className={cn('mb-4 border px-3 py-3 text-center font-mono text-2xl font-bold tracking-wide', authorityToneClass)}>
-                          AUTHORITY WINDOW ACTIVE: {countdown(authorityExpiry, nowMs)}
-                        </div>
-                      ) : null}
-
-                      {pendingExecuteScope ? (
-                        <div className="mb-3 border border-sky-700/70 bg-sky-950/30 px-3 py-2 font-mono text-xs text-sky-200">
-                          autonomous_agent_action: pressing_{pendingExecuteScope === 'execute:refund' ? 'execute_refund' : 'execute_data_deletion'}
-                        </div>
-                      ) : null}
-
-                      {sidebarScope ? (
-                        <div className="mb-3 border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-[11px] text-zinc-200">
-                          <p className="mb-1 text-zinc-400">Token Vault Lifecycle</p>
-                          <div className="flex flex-wrap items-center gap-2">
-                            {['Minted', 'Claimed', 'Executing...', 'Revoked'].map((phase, index) => {
-                              const phaseIndex = index + 1;
-                              const active = tokenLifecyclePhase >= phaseIndex;
-                              return (
-                                <span
-                                  key={phase}
-                                  className={cn(
-                                    'border px-2 py-1',
-                                    active ? 'border-emerald-600/80 bg-emerald-950/40 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-500'
-                                  )}
-                                >
-                                  [{phase}]
-                                </span>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ) : null}
-
-                      <header className="mb-3 border-b border-zinc-800 pb-3">
-                        <h2 className="font-sans text-sm font-semibold uppercase tracking-wide text-zinc-100">Live System Feed &amp; Execution Visibility</h2>
-                        <p className="mt-1 font-mono text-xs text-zinc-500">format: [timestamp] actor event request_id</p>
-                      </header>
-
-                      <div className="max-h-[60vh] space-y-1 overflow-y-auto font-mono text-xs">
-                        {(hasRefundBlock || hasDeletionBlock) ? (
-                          <div className="mb-1 space-y-1 border border-zinc-800 bg-zinc-950/70 p-2">
-                            <p className="text-zinc-300">[{toTime(new Date().toISOString())}] billing-agent-v1 execution_attempt request_id=policy_probe</p>
-                            <p className="text-rose-300">[{toTime(new Date().toISOString())}] policy_engine 403_forbidden request_id=policy_probe</p>
-                            <p className="text-amber-300">[{toTime(new Date().toISOString())}] orchestrator-agent-v1 agent_halted request_id=policy_probe</p>
-                          </div>
-                        ) : null}
-
-                        <AnimatePresence initial={false}>
-                          {events.map((event) => (
-                            <motion.div
-                              key={`${event.workflowId}-${event.seqId}-${event.eventType}-${event.createdAt}`}
-                              className={cn('grid grid-cols-[120px_170px_minmax(0,1fr)] py-1 px-1', eventRowClass(event))}
-                              variants={rowReveal}
-                              initial="hidden"
-                              animate="visible"
-                              exit="hidden"
-                            >
-                              <span className="text-zinc-500">[{toTime(event.createdAt)}]</span>
-                              <span className="text-zinc-400">{eventActor(event)}</span>
-                              <div className={cn('space-y-0.5', eventTone(event))}>
-                                <span className="block">
-                                  <TypeRevealLine text={`${eventLabel(event)} request_id=${eventRequestId(event)}`} animate={event.seqId === latestEventSeqId} />
-                                </span>
-                                <span className="block text-[11px] text-zinc-300/95">requested_by={eventRequestedBy(event)}</span>
-                              </div>
-                            </motion.div>
-                          ))}
-                        </AnimatePresence>
-
-                        {hasRefundConsumed && hasDeletionBlock ? (
-                          <motion.div className="grid grid-cols-[120px_170px_minmax(0,1fr)] border-b border-zinc-800/70 py-1" variants={rowReveal} initial="hidden" animate="visible">
-                            <span className="text-zinc-500">[{toTime(new Date().toISOString())}]</span>
-                            <span className="text-zinc-400">policy_engine</span>
-                            <span className="text-amber-300">cross_action_propagation prevented; new authority required</span>
-                          </motion.div>
-                        ) : null}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="space-y-4">
-                      <div className="border border-emerald-700/70 bg-emerald-950/30 p-4 font-mono text-sm text-emerald-200">
-                        WORKFLOW COMPLETED. All Authority Windows Destroyed.
-                      </div>
-
-                      <div className="border border-zinc-800 bg-zinc-950 p-4 font-mono text-xs text-zinc-200">
-                        <p className="mb-2 text-zinc-100">Security Efficacy Summary</p>
-                        <p>Tokens Minted via Token Vault: 2</p>
-                        <p>Exposure Window Minimized: Yes (&lt; 2 mins per action)</p>
-                        <p>Replay Attacks Prevented: 1</p>
-                      </div>
-
-                      {externalLogUrl ? (
-                        <a
-                          className="inline-block border border-emerald-700 bg-emerald-950/40 px-4 py-2 font-mono text-xs font-semibold tracking-wide text-emerald-300 hover:bg-emerald-900/50"
-                          href={externalLogUrl}
-                          rel="noreferrer"
-                          target="_blank"
+                <section className="h-[60%] overflow-hidden border border-zinc-800 bg-zinc-950/70 p-3">
+                  <header className="mb-2 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">Terminal Feed</h3>
+                    <span className="font-mono text-[11px] text-zinc-500">[timestamp] actor event request_id</span>
+                  </header>
+                  <div
+                    ref={feedContainerRef}
+                    className="h-[calc(100%-28px)] space-y-1 overflow-y-auto pr-1 font-mono text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                    style={{ WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 16%, black 100%)', maskImage: 'linear-gradient(to bottom, transparent 0%, black 16%, black 100%)' }}
+                  >
+                    <AnimatePresence initial={false}>
+                      {events.map((event) => (
+                        <motion.div
+                          key={`${event.workflowId}-${event.seqId}-${event.eventType}-${event.createdAt}`}
+                          className={cn('grid grid-cols-[110px_150px_minmax(0,1fr)] py-1 px-1', eventRowClass(event))}
+                          variants={rowReveal}
+                          initial="hidden"
+                          animate="visible"
+                          exit="hidden"
                         >
-                          [ OPEN CRYPTOGRAPHIC EVIDENCE LEDGER (Google Sheets) ]
-                        </a>
-                      ) : null}
-                    </div>
-                  )}
-
-                  {error ? <p className="mt-3 font-mono text-xs text-rose-300">{error}</p> : null}
-                </motion.section>
-
-                <motion.aside className="border border-zinc-800 bg-zinc-900/90 p-4 backdrop-blur-sm" variants={cardReveal} initial="hidden" animate="visible">
-                  <h3 className="font-sans text-sm font-semibold uppercase tracking-wide text-zinc-100">Auth0 Token Vault Authorization Panel</h3>
-
-                  <div className="mt-3 space-y-2 font-mono text-xs text-zinc-300">
-                    <div className="border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px] text-zinc-400">
-                      <p className="mb-2 text-zinc-200">System Indicators</p>
-                      <p>agent_id: orchestrator-agent-v1</p>
-                      <p>mode: autonomous</p>
-                      <p>token_vault: runtime_fetch_only</p>
-                      <p>credential_storage: none</p>
-                      <p>reason_code: {startedReason}</p>
-                      <p>latest_event: {latestEventSummary}</p>
-                      <p>authorization_state: {shouldShowConsentPanel ? 'intercept_active' : 'streaming'}</p>
-                    </div>
-
-                    {isWorkflowComplete ? (
-                      <>
-                        <p className="text-zinc-300">Workflow Summary</p>
-                        <div className="overflow-hidden rounded border border-zinc-800">
-                          <div className="grid grid-cols-[140px_1fr] bg-zinc-900 px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-400">
-                            <span>Key</span>
-                            <span>Value</span>
+                          <span className="text-zinc-500">[{toTime(event.createdAt)}]</span>
+                          <span className="text-zinc-400">{eventActor(event)}</span>
+                          <div className={cn('space-y-0.5', eventTone(event))}>
+                            <span className="block">
+                              <TypeRevealLine text={`${eventLabel(event)} request_id=${eventRequestId(event)}`} animate={event.seqId === latestEventSeqId} />
+                            </span>
+                            <span className="block text-[11px] text-zinc-300/95">requested_by={eventRequestedBy(event)}</span>
                           </div>
-                          {completedSummaryRows.map((row) => (
-                            <div
-                              key={row.key}
-                              className="grid grid-cols-[140px_1fr] border-t border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-200"
-                            >
-                              <span className="text-zinc-300">{row.key}</span>
-                              <span className="truncate">{row.value}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </>
-                    ) : (
-                      <div className="border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px] text-zinc-400">
-                        <p className="text-zinc-400">This panel is read-only during autonomous execution.</p>
-                      </div>
-                    )}
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
                   </div>
-                </motion.aside>
+                </section>
               </section>
+
+              <aside className="col-span-3 flex h-full flex-col gap-4 overflow-hidden">
+                <section className="h-1/2 overflow-hidden border border-zinc-800 bg-zinc-950/70 p-3">
+                  <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Token Lifecycle</h3>
+                  <div className="space-y-3 font-mono text-xs text-zinc-300">
+                    {(['execute:refund', 'execute:data_deletion'] as HighRiskAction[]).map((scope) => (
+                      <div key={scope} className="space-y-1 border border-zinc-800 bg-zinc-900/40 px-2 py-2">
+                        <p className="text-[11px] text-zinc-400">scope: {scope}</p>
+                        <div className="flex flex-wrap gap-2">
+                          {['Minted', 'Claimed', 'Consumed'].map((phase, index) => {
+                            const active = tokenLifecycleByScope[scope] >= index + 1;
+                            const isConsumedPhase = phase === 'Consumed';
+                            return (
+                              <span
+                                key={`${scope}-${phase}`}
+                                className={cn(
+                                  'border px-2 py-1',
+                                  isConsumedPhase && active
+                                    ? 'border-red-600/80 bg-red-950/40 text-red-400 line-through'
+                                    : active
+                                    ? 'border-emerald-600/80 bg-emerald-950/40 text-emerald-300'
+                                    : 'border-zinc-700 bg-zinc-900 text-zinc-500'
+                                )}
+                              >
+                                [{phase}]
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                    <p>token_vault_source: {tokenVaultEvidence?.tokenSource || 'pending'}</p>
+                    <p>authorization_state: {isInterceptActive ? 'intercept_active' : 'streaming'}</p>
+                  </div>
+                </section>
+
+                <section className="h-1/2 overflow-hidden border border-zinc-800 bg-zinc-950/70 p-3">
+                  <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Cryptographic Proofs</h3>
+                  <div className="space-y-2 font-mono text-[11px] text-zinc-300">
+                    <p>workflow_id: {workflowId}</p>
+                    <p>latest_event: {latestEventSummary}</p>
+                    <p>windows_minted: {events.filter((event) => event.eventType === 'authority_window_issued').length}</p>
+                    <p>windows_consumed: {events.filter((event) => event.eventType === 'authority_window_consumed').length}</p>
+                    <p>replay_blocked: {events.filter((event) => {
+                      if (event.eventType === 'replay_attempt_blocked') return true;
+                      if (event.eventType === 'high_risk_action_blocked') {
+                        const payload = asRecord(event.payload);
+                        return payload.reason === 'authority_consumed';
+                      }
+                      return false;
+                    }).length}</p>
+                  </div>
+                  {isWorkflowComplete && externalLogUrl ? (
+                    <a
+                      className="mt-3 inline-block border border-emerald-700 bg-emerald-950/40 px-3 py-2 font-mono text-xs font-semibold tracking-wide text-emerald-300 hover:bg-emerald-900/50"
+                      href={externalLogUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      [ OPEN CRYPTOGRAPHIC EVIDENCE LEDGER ]
+                    </a>
+                  ) : null}
+                </section>
+              </aside>
             </motion.div>
           ) : null}
         </AnimatePresence>
+
+        <footer className="mt-3 flex h-[8vh] min-h-[58px] items-center justify-between border border-zinc-800/80 bg-zinc-900/70 px-4 text-xs font-mono text-zinc-500">
+          <span>{error?.includes('reconnecting') ? '[🟡 SSE Reconnecting]' : '[🟢 SSE Connected]'}</span>
+          <span>[Latency: {Math.max(12, Math.min(999, nowMs - new Date((latestEvent?.createdAt ?? new Date().toISOString())).getTime()))}ms]</span>
+          <span>[Mode: {mode === 'demo' ? 'Demo' : 'Strict'}]</span>
+        </footer>
       </section>
     </main>
   );
