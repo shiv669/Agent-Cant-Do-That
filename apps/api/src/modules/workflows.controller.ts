@@ -2,6 +2,13 @@ import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import type { StartOffboardingInput } from '@contracts/index';
 import { WorkflowsService } from './workflows.service';
 import { DemoTokenService } from './demo-token.service';
+import {
+  InternalExecuteStepBodyDto,
+  InternalPlanNextBodyDto,
+  StartOffboardingBodyDto,
+  WorkflowIdParamDto,
+  toSupportedAction
+} from './dto/workflows.dto';
 
 @Controller('workflows')
 export class WorkflowsController {
@@ -12,7 +19,7 @@ export class WorkflowsController {
 
   @Post('offboarding/start')
   async startOffboarding(
-    @Body() body: StartOffboardingInput & { opsSubjectToken?: string; demoMode?: boolean },
+    @Body() body: StartOffboardingBodyDto,
     @Req() req: { headers: Record<string, string | string[] | undefined> }
   ) {
     const authHeader = req.headers.authorization;
@@ -27,13 +34,26 @@ export class WorkflowsController {
     } as StartOffboardingInput);
   }
 
+  @Post('internal/plan-next')
+  async planNext(@Body() body: InternalPlanNextBodyDto) {
+    return this.workflowsService.planNextAction(body);
+  }
+
+  @Post('internal/execute-step')
+  async executeStep(@Body() body: InternalExecuteStepBodyDto) {
+    return this.workflowsService.executeActionStep({
+      ...body,
+      action: toSupportedAction(body.action)
+    });
+  }
+
   @Get(':workflowId/status')
-  async getStatus(@Param('workflowId') workflowId: string) {
-    return this.workflowsService.getStatus(workflowId);
+  async getStatus(@Param() params: WorkflowIdParamDto) {
+    return this.workflowsService.getStatus(params.workflowId);
   }
 
   @Get(':workflowId/ledger')
-  async getLedger(@Param('workflowId') workflowId: string) {
-    return this.workflowsService.getLedger(workflowId);
+  async getLedger(@Param() params: WorkflowIdParamDto) {
+    return this.workflowsService.getLedger(params.workflowId);
   }
 }

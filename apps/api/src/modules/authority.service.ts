@@ -395,7 +395,7 @@ export class AuthorityService implements OnModuleInit {
       const metadata = await this.agentRuntimeService.planAction({
         workflowId: consumed.workflow_id,
         customerId: this.extractCustomerIdFromWorkflowId(consumed.workflow_id),
-        action: 'execute_data_deletion'
+        completedActions: ['execute_refund']
       });
 
       await this.checkHighRiskAction({

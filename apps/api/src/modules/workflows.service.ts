@@ -2,7 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Client, Connection } from '@temporalio/client';
 import { Auth0AuthorityService } from './auth0-authority.service';
 import { AuthorityService } from './authority.service';
-import { AgentRuntimeService } from './agent-runtime.service';
+import { AgentRuntimeService, type SupportedAction } from './agent-runtime.service';
 import { LedgerRepository } from './ledger.repository';
 import { EvidenceSheetService } from './evidence-sheet.service';
 import type {
@@ -15,6 +15,17 @@ import type { OnModuleInit } from '@nestjs/common';
 
 @Injectable()
 export class WorkflowsService implements OnModuleInit {
+  private static readonly ACTION_SEQUENCE: SupportedAction[] = [
+    'revoke_access',
+    'export_billing_history',
+    'cancel_subscriptions',
+    'validate_customer_state',
+    'enumerate_data_stores',
+    'run_compliance_check',
+    'execute_refund',
+    'execute_data_deletion'
+  ];
+
   constructor(
     private readonly ledgerRepository: LedgerRepository,
     private readonly auth0AuthorityService: Auth0AuthorityService,
@@ -22,10 +33,6 @@ export class WorkflowsService implements OnModuleInit {
     private readonly agentRuntimeService: AgentRuntimeService,
     private readonly evidenceSheetService: EvidenceSheetService
   ) {}
-
-  private async sleep(ms: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, ms));
-  }
 
   async onModuleInit(): Promise<void> {
     await this.ledgerRepository.ensureSchema();
@@ -50,21 +57,14 @@ export class WorkflowsService implements OnModuleInit {
   private async agentMetadata(input: {
     workflowId: string;
     customerId: string;
-    action:
-      | 'revoke_access'
-      | 'export_billing_history'
-      | 'cancel_subscriptions'
-      | 'validate_customer_state'
-      | 'enumerate_data_stores'
-      | 'run_compliance_check'
-      | 'execute_refund'
-      | 'execute_data_deletion';
+    action: SupportedAction;
     amountUsd?: number;
+    completedActions?: string[];
   }): Promise<Record<string, unknown>> {
     const decision = await this.agentRuntimeService.planAction({
       workflowId: input.workflowId,
       customerId: input.customerId,
-      action: input.action,
+      completedActions: input.completedActions ?? [],
       amountUsd: input.amountUsd
     });
 
@@ -98,13 +98,15 @@ export class WorkflowsService implements OnModuleInit {
     customerId: string;
     actionScope: 'execute:refund' | 'execute:data_deletion';
     amountUsd?: number;
-  }): Promise<void> {
+    completedActions?: string[];
+  }): Promise<{ blocked: boolean }> {
     const action = input.actionScope === 'execute:refund' ? 'execute_refund' : 'execute_data_deletion';
     const metadata = await this.agentMetadata({
       workflowId: input.workflowId,
       customerId: input.customerId,
       action,
-      amountUsd: input.amountUsd
+      amountUsd: input.amountUsd,
+      completedActions: input.completedActions
     });
 
     try {
@@ -117,8 +119,10 @@ export class WorkflowsService implements OnModuleInit {
         modelProvider: metadata.modelProvider as string,
         modelName: metadata.modelName as string
       });
+      return { blocked: false };
     } catch {
       // Blocked attempts are expected and recorded in the append-only ledger.
+      return { blocked: true };
     }
   }
 
@@ -388,114 +392,198 @@ export class WorkflowsService implements OnModuleInit {
     };
   }
 
-  private async executeOffboardingInBackground(input: {
-    workflowId: string;
-    customerId: string;
-    opsSubjectToken?: string;
-    refundAmountUsd: number;
-  }): Promise<void> {
-    const requireTokenVaultExport = process.env.TOKEN_VAULT_BILLING_EXPORT_REQUIRED === 'true';
+  private deriveCompletedActions(events: LedgerEvent[]): SupportedAction[] {
+    const completed = new Set<SupportedAction>();
 
-    await this.sleep(500);
-    const revokeMetadata = await this.agentMetadata({
-      workflowId: input.workflowId,
-      customerId: input.customerId,
-      action: 'revoke_access'
-    });
-    await this.appendEvent(input.workflowId, 'revoke_sso_access_completed', {
-      provider: 'enterprise_sso',
-      ...revokeMetadata
-    });
-
-    await this.sleep(500);
-    let billingExportPayload: Record<string, unknown>;
-    const billingMetadata = await this.agentMetadata({
-      workflowId: input.workflowId,
-      customerId: input.customerId,
-      action: 'export_billing_history'
-    });
-    try {
-      billingExportPayload = await this.exportBillingHistoryViaTokenVault({
-        customerId: input.customerId,
-        workflowId: input.workflowId,
-        opsSubjectToken: input.opsSubjectToken,
-        refundAmountUsd: input.refundAmountUsd
-      });
-    } catch (error) {
-      if (requireTokenVaultExport) {
-        const reason = error instanceof Error ? error.message : 'Token Vault billing export failed';
-        await this.appendEvent(input.workflowId, 'authorization_blocked', {
-          reason,
-          stage: 'billing_history_exported'
-        });
-        return;
+    for (const event of events) {
+      switch (event.eventType) {
+        case 'revoke_sso_access_completed':
+          completed.add('revoke_access');
+          break;
+        case 'billing_history_exported':
+          completed.add('export_billing_history');
+          break;
+        case 'subscriptions_cancelled':
+          completed.add('cancel_subscriptions');
+          break;
+        case 'customer_validation_passed':
+          completed.add('validate_customer_state');
+          break;
+        case 'data_stores_enumerated':
+          completed.add('enumerate_data_stores');
+          break;
+        case 'compliance_check_passed':
+          completed.add('run_compliance_check');
+          break;
+        case 'authority_window_consumed': {
+          const payload = event.payload as Record<string, unknown>;
+          if (payload.actionScope === 'execute:refund') {
+            completed.add('execute_refund');
+          }
+          if (payload.actionScope === 'execute:data_deletion') {
+            completed.add('execute_data_deletion');
+          }
+          break;
+        }
+        default:
+          break;
       }
-
-      billingExportPayload = {
-        exportFormat: 'csv',
-        tokenSource: 'none',
-        reason: error instanceof Error ? error.message : 'Token Vault billing export failed'
-      };
     }
 
-    await this.appendEvent(input.workflowId, 'billing_history_exported', {
-      ...billingExportPayload,
-      ...billingMetadata
-    });
+    return [...completed];
+  }
 
-    await this.sleep(500);
-    const subscriptionMetadata = await this.agentMetadata({
+  private nextIncompleteAction(completedActions: readonly string[]): SupportedAction {
+    const completed = new Set(completedActions);
+    for (const action of WorkflowsService.ACTION_SEQUENCE) {
+      if (!completed.has(action)) {
+        return action;
+      }
+    }
+
+    return 'execute_data_deletion';
+  }
+
+  async planNextAction(input: {
+    workflowId: string;
+    customerId: string;
+    refundAmountUsd: number;
+  }): Promise<{ nextAction: SupportedAction; reasoning: string; actionReason: string; completedActions: string[] }> {
+    const events = await this.ledgerRepository.listByWorkflowId(input.workflowId);
+    const completedActions = this.deriveCompletedActions(events);
+
+    const decision = await this.agentRuntimeService.planAction({
       workflowId: input.workflowId,
       customerId: input.customerId,
-      action: 'cancel_subscriptions'
-    });
-    await this.appendEvent(input.workflowId, 'subscriptions_cancelled', {
-      cancelledCount: 3,
-      ...subscriptionMetadata
-    });
-
-    await this.sleep(1500);
-    const validationMetadata = await this.agentMetadata({
-      workflowId: input.workflowId,
-      customerId: input.customerId,
-      action: 'validate_customer_state'
-    });
-    await this.appendEvent(input.workflowId, 'customer_validation_passed', {
-      customerId: input.customerId,
-      status: 'active',
-      ...validationMetadata
-    });
-
-    await this.sleep(2000);
-    const enumerateMetadata = await this.agentMetadata({
-      workflowId: input.workflowId,
-      customerId: input.customerId,
-      action: 'enumerate_data_stores'
-    });
-    await this.appendEvent(input.workflowId, 'data_stores_enumerated', {
-      storeCount: 14,
-      ...enumerateMetadata
-    });
-
-    await this.sleep(1000);
-    const complianceMetadata = await this.agentMetadata({
-      workflowId: input.workflowId,
-      customerId: input.customerId,
-      action: 'run_compliance_check'
-    });
-    await this.appendEvent(input.workflowId, 'compliance_check_passed', {
-      legalHolds: 0,
-      offboardingPermitted: true,
-      ...complianceMetadata
-    });
-
-    await this.sleep(500);
-    await this.attemptHighRiskAction({
-      workflowId: input.workflowId,
-      customerId: input.customerId,
-      actionScope: 'execute:refund',
+      completedActions,
       amountUsd: input.refundAmountUsd
     });
+
+    const completedSet = new Set(completedActions);
+    const nextAction = completedSet.has(decision.action)
+      ? this.nextIncompleteAction(completedActions)
+      : decision.action;
+
+    return {
+      nextAction,
+      reasoning: decision.reasoning,
+      actionReason: decision.actionReason,
+      completedActions
+    };
+  }
+
+  async executeActionStep(input: {
+    workflowId: string;
+    customerId: string;
+    action: SupportedAction;
+    refundAmountUsd: number;
+    opsSubjectToken?: string;
+    completedActions?: string[];
+  }): Promise<{ action: SupportedAction; blocked: boolean; completed: boolean }> {
+    // Guard against duplicate activity retries or non-monotonic planning outputs.
+    const existingEvents = await this.ledgerRepository.listByWorkflowId(input.workflowId);
+    const alreadyCompleted = new Set(this.deriveCompletedActions(existingEvents));
+    if (alreadyCompleted.has(input.action)) {
+      return { action: input.action, blocked: false, completed: true };
+    }
+
+    const requireTokenVaultExport = process.env.TOKEN_VAULT_BILLING_EXPORT_REQUIRED === 'true';
+    const metadata = await this.agentMetadata({
+      workflowId: input.workflowId,
+      customerId: input.customerId,
+      action: input.action,
+      amountUsd: input.refundAmountUsd,
+      completedActions: input.completedActions
+    });
+
+    switch (input.action) {
+      case 'revoke_access':
+        await this.appendEvent(input.workflowId, 'revoke_sso_access_completed', {
+          provider: 'enterprise_sso',
+          ...metadata
+        });
+        return { action: input.action, blocked: false, completed: true };
+      case 'export_billing_history': {
+        let billingExportPayload: Record<string, unknown>;
+        try {
+          billingExportPayload = await this.exportBillingHistoryViaTokenVault({
+            customerId: input.customerId,
+            workflowId: input.workflowId,
+            opsSubjectToken: input.opsSubjectToken,
+            refundAmountUsd: input.refundAmountUsd
+          });
+        } catch (error) {
+          if (requireTokenVaultExport) {
+            const reason = error instanceof Error ? error.message : 'Token Vault billing export failed';
+            await this.appendEvent(input.workflowId, 'authorization_blocked', {
+              reason,
+              stage: 'billing_history_exported',
+              ...metadata
+            });
+            return { action: input.action, blocked: true, completed: false };
+          }
+
+          billingExportPayload = {
+            exportFormat: 'csv',
+            tokenSource: 'none',
+            reason: error instanceof Error ? error.message : 'Token Vault billing export failed'
+          };
+        }
+
+        await this.appendEvent(input.workflowId, 'billing_history_exported', {
+          ...billingExportPayload,
+          ...metadata
+        });
+        return { action: input.action, blocked: false, completed: true };
+      }
+      case 'cancel_subscriptions':
+        await this.appendEvent(input.workflowId, 'subscriptions_cancelled', {
+          cancelledCount: 3,
+          ...metadata
+        });
+        return { action: input.action, blocked: false, completed: true };
+      case 'validate_customer_state':
+        await this.appendEvent(input.workflowId, 'customer_validation_passed', {
+          customerId: input.customerId,
+          status: 'active',
+          ...metadata
+        });
+        return { action: input.action, blocked: false, completed: true };
+      case 'enumerate_data_stores':
+        await this.appendEvent(input.workflowId, 'data_stores_enumerated', {
+          storeCount: 14,
+          ...metadata
+        });
+        return { action: input.action, blocked: false, completed: true };
+      case 'run_compliance_check':
+        await this.appendEvent(input.workflowId, 'compliance_check_passed', {
+          legalHolds: 0,
+          offboardingPermitted: true,
+          ...metadata
+        });
+        return { action: input.action, blocked: false, completed: true };
+      case 'execute_refund': {
+        const result = await this.attemptHighRiskAction({
+          workflowId: input.workflowId,
+          customerId: input.customerId,
+          actionScope: 'execute:refund',
+          amountUsd: input.refundAmountUsd,
+          completedActions: input.completedActions
+        });
+        return { action: input.action, blocked: result.blocked, completed: !result.blocked };
+      }
+      case 'execute_data_deletion': {
+        const result = await this.attemptHighRiskAction({
+          workflowId: input.workflowId,
+          customerId: input.customerId,
+          actionScope: 'execute:data_deletion',
+          completedActions: input.completedActions
+        });
+        return { action: input.action, blocked: result.blocked, completed: !result.blocked };
+      }
+      default:
+        return { action: input.action, blocked: true, completed: false };
+    }
   }
 
   async startOffboarding(input: StartOffboardingInput): Promise<StartOffboardingResponse> {
@@ -512,19 +600,14 @@ export class WorkflowsService implements OnModuleInit {
     await client.workflow.start('customerOffboardingWorkflow', {
       taskQueue: 'acdt-task-queue',
       workflowId,
-      args: [input]
-    });
-
-    void this.executeOffboardingInBackground({
-      workflowId,
-      customerId: input.customerId,
-      opsSubjectToken,
-      refundAmountUsd
-    }).catch(async (error: unknown) => {
-      await this.appendEvent(workflowId, 'authorization_blocked', {
-        reason: error instanceof Error ? error.message : 'Offboarding execution failed',
-        stage: 'background_execution'
-      });
+      args: [
+        {
+          workflowId,
+          customerId: input.customerId,
+          refundAmountUsd,
+          opsSubjectToken
+        }
+      ]
     });
 
     return {

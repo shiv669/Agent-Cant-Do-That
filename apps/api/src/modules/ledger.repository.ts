@@ -5,6 +5,7 @@ import { Observable, Subject } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import type { LedgerEvent } from '@contracts/index';
 import { EvidenceSheetService } from './evidence-sheet.service';
+import { requestContext } from '../common/request-context';
 
 type LedgerInsert = {
   workflowId: string;
@@ -123,6 +124,11 @@ export class LedgerRepository {
   }
 
   async appendEvent(input: LedgerInsert): Promise<LedgerEvent> {
+    const requestId = requestContext.getRequestId() ?? 'unknown';
+    console.log(
+      `[LEDGER_APPEND] requestId=${requestId} workflowId=${input.workflowId} eventType=${input.eventType}`
+    );
+
     const result = await this.pool.query<LedgerRow>(
       `
         INSERT INTO authority_ledger_events (workflow_id, event_type, event_payload)

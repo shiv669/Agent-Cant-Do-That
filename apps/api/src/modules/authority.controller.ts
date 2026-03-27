@@ -11,6 +11,17 @@ import type {
 } from '@contracts/index';
 import { AuthorityService } from './authority.service';
 import { DemoTokenService } from './demo-token.service';
+import {
+  AuthorityWindowClaimBodyDto,
+  AuthorityWindowConsumeBodyDto,
+  AuthorityWindowReplayBodyDto,
+  AuthorityWindowRequestBodyDto,
+  EscalationAttemptBodyDto,
+  HighRiskCheckBodyDto,
+  LedgerStreamQueryDto,
+  WindowIdParamDto,
+  WorkflowIdParamDto
+} from './dto/authority.dto';
 
 @Controller('authority')
 export class AuthorityController {
@@ -31,20 +42,20 @@ export class AuthorityController {
   }
 
   @Post('high-risk/check')
-  async checkHighRiskAction(@Body() body: HighRiskAuthorityCheckInput, @Req() req: { headers: Record<string, string | string[] | undefined> }) {
+  async checkHighRiskAction(@Body() body: HighRiskCheckBodyDto, @Req() req: { headers: Record<string, string | string[] | undefined> }) {
     this.getAgentClientId(req);
-    return this.authorityService.checkHighRiskAction(body);
+    return this.authorityService.checkHighRiskAction(body as HighRiskAuthorityCheckInput);
   }
 
   @Post('escalate')
-  async escalate(@Body() body: EscalationAttemptInput, @Req() req: { headers: Record<string, string | string[] | undefined> }) {
+  async escalate(@Body() body: EscalationAttemptBodyDto, @Req() req: { headers: Record<string, string | string[] | undefined> }) {
     this.getAgentClientId(req);
-    return this.authorityService.recordEscalationAttempt(body);
+    return this.authorityService.recordEscalationAttempt(body as EscalationAttemptInput);
   }
 
   @Post('window/request')
   async requestAuthorityWindow(
-    @Body() body: AuthorityWindowRequestInput & { agentId?: string; scope?: string; demoMode?: boolean },
+    @Body() body: AuthorityWindowRequestBodyDto,
     @Req() req: { headers: Record<string, string | string[] | undefined> }
   ) {
     const agentClientId = this.getAgentClientId(req);
@@ -74,7 +85,7 @@ export class AuthorityController {
 
   @Post('window/claim')
   async claimAuthorityWindow(
-    @Body() body: AuthorityWindowClaimInput & { agentId?: string },
+    @Body() body: AuthorityWindowClaimBodyDto,
     @Req() req: { headers: Record<string, string | string[] | undefined> }
   ) {
     const agentClientId = this.getAgentClientId(req);
@@ -87,7 +98,7 @@ export class AuthorityController {
 
   @Post('window/consume')
   async consumeAuthorityWindow(
-    @Body() body: AuthorityWindowConsumeInput & { agentId?: string },
+    @Body() body: AuthorityWindowConsumeBodyDto,
     @Req() req: { headers: Record<string, string | string[] | undefined> }
   ) {
     const agentClientId = this.getAgentClientId(req);
@@ -102,7 +113,7 @@ export class AuthorityController {
 
   @Post('window/replay-attempt')
   async replayAttempt(
-    @Body() body: AuthorityWindowReplayAttemptInput & { agentId?: string },
+    @Body() body: AuthorityWindowReplayBodyDto,
     @Req() req: { headers: Record<string, string | string[] | undefined> }
   ) {
     const agentClientId = this.getAgentClientId(req);
@@ -114,29 +125,30 @@ export class AuthorityController {
   }
 
   @Get('window/:windowId')
-  async getWindow(@Param('windowId') windowId: string) {
-    return this.authorityService.getWindow(windowId);
+  async getWindow(@Param() params: WindowIdParamDto) {
+    return this.authorityService.getWindow(params.windowId);
   }
 
   @Get('ledger/:workflowId')
-  async getWorkflowLedger(@Param('workflowId') workflowId: string) {
-    return this.authorityService.getWorkflowLedger(workflowId);
+  async getWorkflowLedger(@Param() params: WorkflowIdParamDto) {
+    return this.authorityService.getWorkflowLedger(params.workflowId);
   }
 
   @Sse('ledger/:workflowId/stream')
   streamWorkflowLedger(
-    @Param('workflowId') workflowId: string,
-    @Query('sinceSeqId') sinceSeqIdRaw?: string,
+    @Param() params: WorkflowIdParamDto,
+    @Query() query: LedgerStreamQueryDto,
     @Req() req?: { headers?: Record<string, string | string[] | undefined> }
   ): Observable<MessageEvent> {
     const lastEventHeader = req?.headers?.['last-event-id'];
     const lastEventIdRaw = Array.isArray(lastEventHeader) ? lastEventHeader[0] : lastEventHeader;
 
-    const candidates = [sinceSeqIdRaw, lastEventIdRaw]
-      .map((value) => (typeof value === 'string' ? Number(value) : NaN))
-      .filter((value) => Number.isFinite(value) && value >= 0);
+    const candidates = [
+      typeof query.sinceSeqId === 'number' ? query.sinceSeqId : NaN,
+      typeof lastEventIdRaw === 'string' ? Number(lastEventIdRaw) : NaN
+    ].filter((value) => Number.isFinite(value) && value >= 0);
 
     const sinceSeqId = candidates.length > 0 ? Math.max(...candidates) : undefined;
-    return this.authorityService.streamWorkflowLedger(workflowId, sinceSeqId);
+    return this.authorityService.streamWorkflowLedger(params.workflowId, sinceSeqId);
   }
 }

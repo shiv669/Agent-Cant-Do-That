@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AuthorityController } from './authority.controller';
 import { AuthorityService } from './authority.service';
 import { Auth0AuthorityService } from './auth0-authority.service';
@@ -11,6 +11,7 @@ import { LedgerRepository } from './ledger.repository';
 import { EvidenceSheetService } from './evidence-sheet.service';
 import { DemoController } from './demo.controller';
 import { DemoTokenService } from './demo-token.service';
+import { CorrelationIdMiddleware } from '../common/middleware/correlation-id.middleware';
 
 @Module({
   imports: [],
@@ -26,4 +27,8 @@ import { DemoTokenService } from './demo-token.service';
     DemoTokenService
   ]
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(CorrelationIdMiddleware).forRoutes('*');
+  }
+}

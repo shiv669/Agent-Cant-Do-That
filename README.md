@@ -290,25 +290,37 @@ Before using demo mode, run bootstrap once per environment. This stores per-role
 	- `OPS_USER_ID`
 	- `CFO_USER_ID`
 	- `DPO_USER_ID`
-3. Bootstrap demo auth (one-time CIBA approvals for ops/CFO/DPO users):
+3. Bootstrap demo auth (one-time CIBA approvals for ops/CFO/DPO users).
 
-```bash
-curl -X POST http://localhost:4001/api/demo/admin/bootstrap-tokens \
-  -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+PowerShell (Windows, exact working commands):
+
+```powershell
+$headers = @{ "x-demo-admin-key" = "<DEMO_ADMIN_KEY>" }
+Invoke-RestMethod -Method Post -Uri "http://localhost:4001/api/demo/admin/bootstrap-tokens" -Headers $headers
 ```
 
-4. Check demo status:
+4. Check demo status.
 
-```bash
-curl http://localhost:4001/api/demo/admin/status \
-  -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+PowerShell (Windows, exact working command):
+
+```powershell
+Invoke-RestMethod -Method Get -Uri "http://localhost:4001/api/demo/admin/status" -Headers $headers | ConvertTo-Json -Depth 8
 ```
 
-5. Optional clear/reset:
+5. Optional clear/reset.
+
+PowerShell (Windows, exact working command):
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:4001/api/demo/admin/clear-tokens" -Headers $headers
+```
+
+Bash equivalents:
 
 ```bash
-curl -X POST http://localhost:4001/api/demo/admin/clear-tokens \
-  -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+curl -X POST "http://localhost:4001/api/demo/admin/bootstrap-tokens" -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+curl "http://localhost:4001/api/demo/admin/status" -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
+curl -X POST "http://localhost:4001/api/demo/admin/clear-tokens" -H "x-demo-admin-key: <DEMO_ADMIN_KEY>"
 ```
 
 If demo returns `demo_token_expired — re-run bootstrap`, the stored Token Vault refresh token is missing, expired, or revoked. Re-run bootstrap.
@@ -362,3 +374,5 @@ Sandbox and safety note:
 
 - Product requirements: [PRD.md](PRD.md)
 - Architecture decisions: [ADR.md](ADR.md)
+
+

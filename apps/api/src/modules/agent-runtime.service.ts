@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
-type SupportedAction =
+export type SupportedAction =
   | 'revoke_access'
   | 'export_billing_history'
   | 'cancel_subscriptions'
@@ -22,9 +22,31 @@ export type AgentDecision = {
 type PlanInput = {
   workflowId: string;
   customerId: string;
-  action: SupportedAction;
+  completedActions: string[];
   amountUsd?: number;
 };
+
+const SUPPORTED_ACTIONS: SupportedAction[] = [
+  'revoke_access',
+  'export_billing_history',
+  'cancel_subscriptions',
+  'validate_customer_state',
+  'enumerate_data_stores',
+  'run_compliance_check',
+  'execute_refund',
+  'execute_data_deletion'
+];
+
+const LOW_RISK_SEQUENCE: SupportedAction[] = [
+  'revoke_access',
+  'export_billing_history',
+  'cancel_subscriptions',
+  'validate_customer_state',
+  'enumerate_data_stores',
+  'run_compliance_check',
+  'execute_refund',
+  'execute_data_deletion'
+];
 
 @Injectable()
 export class AgentRuntimeService {
@@ -48,16 +70,20 @@ export class AgentRuntimeService {
       'You are an autonomous enterprise operations agent.',
       'Return JSON only.',
       'Do not include markdown code fences.',
-      'The system enforces policy externally. You provide an auditable reason for attempting the action.',
-      'JSON schema: {"action":"string","actionReason":"string","reasoning":"string"}'
+      'Choose the next logical offboarding step from the supported action list.',
+      'Never invent new actions.',
+      'The system enforces policy externally. Provide an auditable reason for the selected next action.',
+      'JSON schema: {"next_action":"SupportedAction","reasoning":"string"}'
     ].join(' ');
 
     const userPrompt = JSON.stringify({
       workflowId: input.workflowId,
       customerId: input.customerId,
-      action: input.action,
+      completedActions: input.completedActions,
+      supportedActions: SUPPORTED_ACTIONS,
       amountUsd: input.amountUsd ?? null,
-      instruction: 'Provide concise audit-ready actionReason and reasoning for this action attempt.'
+      instruction:
+        'Select exactly one next_action from supportedActions to safely progress offboarding given completedActions.'
     });
 
     try {
@@ -91,13 +117,14 @@ export class AgentRuntimeService {
         return null;
       }
 
-      const parsed = JSON.parse(content) as Partial<AgentDecision> & { action?: string };
-      const action = (parsed.action ?? input.action) as SupportedAction;
+      const parsed = JSON.parse(content) as { next_action?: string; reasoning?: string };
+      const suggestedAction = parsed.next_action as SupportedAction;
+      const action = SUPPORTED_ACTIONS.includes(suggestedAction) ? suggestedAction : this.nextFromRules(input);
 
       return {
         action,
-        actionReason: this.normalizeText(parsed.actionReason, this.defaultReason(input.action)),
-        reasoning: this.normalizeText(parsed.reasoning, this.defaultReasoning(input.action)),
+        actionReason: this.defaultReason(action, input.amountUsd),
+        reasoning: this.normalizeText(parsed.reasoning, this.defaultReasoning(action, input.customerId)),
         decisionSource: 'llm',
         modelProvider: 'groq',
         modelName: this.groqModel
@@ -108,14 +135,27 @@ export class AgentRuntimeService {
   }
 
   private planViaRules(input: PlanInput): AgentDecision {
+    const action = this.nextFromRules(input);
+
     return {
-      action: input.action,
-      actionReason: this.defaultReason(input.action, input.amountUsd),
-      reasoning: this.defaultReasoning(input.action, input.customerId),
+      action,
+      actionReason: this.defaultReason(action, input.amountUsd),
+      reasoning: this.defaultReasoning(action, input.customerId),
       decisionSource: 'rules',
       modelProvider: 'rules',
       modelName: 'deterministic-policy'
     };
+  }
+
+  private nextFromRules(input: PlanInput): SupportedAction {
+    const done = new Set(input.completedActions);
+    for (const action of LOW_RISK_SEQUENCE) {
+      if (!done.has(action)) {
+        return action;
+      }
+    }
+
+    return 'execute_data_deletion';
   }
 
   private normalizeText(value: unknown, fallback: string): string {
