@@ -902,6 +902,18 @@ export default function HomePage() {
     return extractEvidence(events) ?? fallbackEvidence;
   }, [events, fallbackEvidence]);
 
+  const latestWindowId = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const payload = asRecord(events[index]?.payload);
+      const windowId = payload.windowId;
+      if (typeof windowId === 'string' && windowId.length > 0) {
+        return windowId;
+      }
+    }
+
+    return 'n/a';
+  }, [events]);
+
   const completedSummaryRows = useMemo(() => {
     const mintedCount = events.filter((event) => event.eventType === 'authority_window_issued').length;
     const replayBlockedCount = events.filter((event) => event.eventType === 'replay_attempt_blocked').length;
@@ -1210,7 +1222,23 @@ export default function HomePage() {
 
                   <div className="flex-1 overflow-hidden mt-1 flex flex-col justify-between">
                     {isWorkflowComplete ? (
-                      <p className="text-center font-mono text-xs font-semibold text-emerald-300">WORKFLOW COMPLETED</p>
+                      <div className="w-full space-y-1">
+                        <p className="text-center font-mono text-[11px] font-semibold text-emerald-300">WORKFLOW COMPLETED</p>
+                        <div className="border border-emerald-800/60 bg-emerald-950/15 px-1.5 py-1">
+                          <div className="grid grid-cols-[1fr_auto] gap-x-2 gap-y-0.5 font-mono text-[9px] leading-tight text-zinc-200">
+                            {completedSummaryRows.map((row) => (
+                              <div key={row.key} className="contents">
+                                <p className="truncate text-zinc-400" title={row.key}>
+                                  {row.key}
+                                </p>
+                                <p className="truncate text-right text-emerald-200" title={row.value}>
+                                  {row.value}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
                     ) : isInterceptActive && interceptScope ? (
                       mode === 'live' ? (
                         <p className="animate-pulse text-center font-mono text-xs text-amber-300">
@@ -1344,6 +1372,7 @@ export default function HomePage() {
                   <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-zinc-400">Cryptographic Proofs</h3>
                   <div className="space-y-2 font-mono text-[11px] text-zinc-300">
                     <p>workflow_id: {workflowId}</p>
+                    <p>window_id: {latestWindowId}</p>
                     <p>latest_event: {latestEventSummary}</p>
                     <p>windows_minted: {events.filter((event) => event.eventType === 'authority_window_issued').length}</p>
                     <p>windows_consumed: {events.filter((event) => event.eventType === 'authority_window_consumed').length}</p>
