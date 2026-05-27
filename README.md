@@ -53,7 +53,7 @@ Approval for one action does not apply to another.
 
 <p align="center">
   <a href="https://youtu.be/C6rvLo8j3BE">
-    <img src="https://img.youtube.com/vi/C6rvLo8j3BE/maxresdefault.jpg" width="800" alt="Watch the demo video">
+    <img src="https://img.youtube.com/vi/C6rvLo8j3BE/hqdefault.jpg" width="800" alt="Watch the demo video">
   </a>
 </p>
 
